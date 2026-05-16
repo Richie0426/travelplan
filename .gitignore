@@ -1,0 +1,114 @@
+# ===================================================================
+# 智慧旅遊規劃書 — .gitignore
+# ===================================================================
+# 本檔排除「不該進 Git 的雜訊檔」(IDE 設定、系統暫存、相依套件等)
+#
+# 注意:config.js 預設「不」忽略!
+# Firebase Web API Key 本來就是公開的,安全靠 Firestore Rules 保證,
+# 所以可直接 commit 進 Git,部署到 GitHub Pages 後才能正常運作。
+# 若您堅持要把 config.js 排除(策略 B),取消下方註解即可。
+# ===================================================================
+
+
+# === 作業系統雜訊檔 ===
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+
+# === 編輯器 / IDE 設定 ===
+# VS Code(個人偏好設定,團隊共用設定請保留 .vscode/extensions.json 等)
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# JetBrains(WebStorm 等)
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+
+# === 開發過程暫存 ===
+# 日誌
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 環境變數檔(若未來加入)
+.env
+.env.local
+.env.*.local
+
+# 編譯輸出 / 暫存目錄
+dist/
+build/
+out/
+.cache/
+.tmp/
+.temp/
+
+
+# === Node.js(若未來加入工具鏈)===
+node_modules/
+.npm
+.yarn/
+.pnp.*
+package-lock.json.backup
+
+
+# === 測試 / 覆蓋率 ===
+coverage/
+.nyc_output/
+*.lcov
+
+
+# === 本機資料 / 備份 ===
+# 若您手動下載觀光署 POI 做本機備份
+*.bak
+*.backup
+poi-backup-*.json
+
+# 個人筆記(若放在專案內又不想公開)
+NOTES.local.md
+TODO.local.md
+
+
+# === Firebase 相關 ===
+# Firebase CLI 暫存
+.firebase/
+.firebaserc.local
+firebase-debug.log
+firebase-debug.*.log
+firestore-debug.log
+
+# config.js — 預設「不」忽略(見檔案頂部說明)
+# 若您要採用策略 B(不 commit 金鑰),取消下方註解:
+# config.js
