@@ -1,0 +1,13 @@
+{
+  "name": "智慧旅遊規劃書",
+  "short_name": "旅遊計畫",
+  "description": "家庭旅遊規劃與導航工具",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f8fafc",
+  "theme_color": "#3b82f6",
+  "lang": "zh-Hant",
+  "icons": []
+}

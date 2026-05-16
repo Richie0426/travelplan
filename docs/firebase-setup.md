@@ -162,23 +162,32 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // 規劃者私有空間：只有 owner 能讀寫
+    // 規劃者私有空間（預設規則）：只有 owner 能讀寫自己的所有資料
     match /artifacts/{appId}/users/{userId}/{document=**} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // 家庭分享入口:任何已登入者可讀,只有 owner 能寫
-    match /artifacts/{appId}/shared_family/{shareCode} {
+    // 例外：家人可在規劃者的 known_family 自我註冊（只能寫 docId == 自己 UID 那筆）
+    match /artifacts/{appId}/users/{userId}/known_family/{memberId} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null && request.auth.uid == resource.data.ownerUid;
+      allow create, update: if request.auth != null && request.auth.uid == memberId;
+      allow delete: if request.auth != null && (request.auth.uid == userId || request.auth.uid == memberId);
     }
 
-    // 分享行程:任何已登入者可讀,只有 owner 能寫
+    // 家庭分享入口：任何已登入者可讀，只有 owner 能寫
+    match /artifacts/{appId}/shared_family/{shareCode} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if request.auth != null && request.auth.uid == resource.data.ownerUid;
+    }
+
+    // 分享行程：任何已登入者可讀，只有 owner 能寫
     match /artifacts/{appId}/shared_trips/{tripId} {
       allow read: if request.auth != null;
-      allow write: if request.auth != null && request.auth.uid == resource.data.ownerUid;
+      allow create: if request.auth != null && request.resource.data.ownerUid == request.auth.uid;
+      allow update, delete: if request.auth != null && request.auth.uid == resource.data.ownerUid;
 
-      // 參與者:任何人可讀(看大家位置),只有自己能寫自己的
+      // 參與者：任何人可讀（看大家位置），只有自己能寫自己的
       match /participants/{participantUid} {
         allow read: if request.auth != null;
         allow write: if request.auth != null && request.auth.uid == participantUid;
@@ -187,6 +196,10 @@ service cloud.firestore {
   }
 }
 ```
+
+> **修正說明（Phase 1 實作後發現）**：
+> - 原 `write: if ... resource.data.ownerUid == request.auth.uid` 在 `create` 時 `resource` 為 null 會永遠失敗，須拆成 `create`（用 `request.resource`）與 `update/delete`（用 `resource`）。
+> - 家人匿名登入後須能寫入規劃者的 `known_family/{自己UID}`，所以針對 known_family 加開放規則。
 
 - 點 **「發布」（Publish）**。
 - 應該會看到「規則已發布」提示。

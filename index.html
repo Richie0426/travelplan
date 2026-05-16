@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#3b82f6" />
+  <title>智慧旅遊規劃書</title>
+  <link rel="manifest" href="./manifest.json" />
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Leaflet (Phase 3 才實際使用,先載入避免後續再改 head) -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- React 18 -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Firebase v10 compat (與 v9 modular 不同,使用全域 firebase 物件) -->
+  <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+
+  <!-- 使用者本機設定 -->
+  <script src="./config.js"></script>
+
+  <style>
+    html, body { height: 100%; }
+    body { -webkit-tap-highlight-color: transparent; }
+    /* 避免 iOS 雙擊縮放與長按選取 */
+    button { user-select: none; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useCallback, useRef, useMemo } = React;
+
+    // ================================================================
+    // 常數
+    // ================================================================
+    const ICON_OPTIONS = ['🚙', '🚗', '🚐', '🛻', '🏍️', '🚌', '🚲', '✨'];
+    const COLOR_OPTIONS = [
+      { name: '藍', value: '#3B82F6' },
+      { name: '紅', value: '#EF4444' },
+      { name: '綠', value: '#10B981' },
+      { name: '橘', value: '#F59E0B' },
+      { name: '紫', value: '#8B5CF6' },
+      { name: '粉', value: '#EC4899' },
+    ];
+    const LS_VIEWER_PROFILE_PREFIX = 'tw-travel-viewer-profile:';
+
+    // ================================================================
+    // Firebase 初始化
+    // ================================================================
+    let firebaseInitError = null;
+    try {
+      if (!window.firebaseConfig) {
+        throw new Error('找不到 config.js 或 window.firebaseConfig 未設定');
+      }
+      firebase.initializeApp(window.firebaseConfig);
+    } catch (e) {
+      console.error('[Firebase] init failed', e);
+      firebaseInitError = e.message || String(e);
+    }
+    const auth = firebaseInitError ? null : firebase.auth();
+    const db = firebaseInitError ? null : firebase.firestore();
+    const appId = window.appId || 'travel-plan-personal';
+
+    // ================================================================
+    // Firestore 路徑輔助
+    // ================================================================
+    const paths = {
+      user: (uid) => db.collection('artifacts').doc(appId).collection('users').doc(uid),
+      userTrips: (uid) => db.collection('artifacts').doc(appId).collection('users').doc(uid).collection('trips'),
+      userTrip: (uid, tripId) => db.collection('artifacts').doc(appId).collection('users').doc(uid).collection('trips').doc(tripId),
+      knownFamily: (uid) => db.collection('artifacts').doc(appId).collection('users').doc(uid).collection('known_family'),
+      knownFamilyMember: (uid, memberUid) => db.collection('artifacts').doc(appId).collection('users').doc(uid).collection('known_family').doc(memberUid),
+      sharedFamily: (code) => db.collection('artifacts').doc(appId).collection('shared_family').doc(code),
+      sharedTrip: (tripId) => db.collection('artifacts').doc(appId).collection('shared_trips').doc(tripId),
+      participant: (tripId, uid) => db.collection('artifacts').doc(appId).collection('shared_trips').doc(tripId).collection('participants').doc(uid),
+    };
+
+    // ================================================================
+    // 工具函式
+    // ================================================================
+    function getUrlFamilyCode() {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('family');
+    }
+
+    function generateFamilyShareCode(displayName) {
+      const year = new Date().getFullYear();
+      const clean = (displayName || 'USER').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      return `${clean.slice(0, 6) || 'USER'}${year}`;
+    }
+
+    async function ensureUniqueFamilyShareCode(baseCode, ownerUid) {
+      let code = baseCode;
+      for (let i = 0; i < 50; i++) {
+        try {
+          const snap = await paths.sharedFamily(code).get();
+          if (!snap.exists) return code;
+          if (snap.data().ownerUid === ownerUid) return code;
+        } catch (e) {
+          console.warn('[shareCode] uniqueness check failed', code, e);
+          return code;
+        }
+        code = `${baseCode}-${i + 2}`;
+      }
+      return baseCode + '-' + Date.now().toString().slice(-4);
+    }
+
+    function parseRoute(hash) {
+      const h = hash || window.location.hash || '#/';
+      if (h.startsWith('#/family')) return { view: 'family_list' };
+      const editMatch = h.match(/^#\/edit\/(.+)$/);
+      if (editMatch) return { view: 'editor', tripId: editMatch[1] };
+      const tripMatch = h.match(/^#\/trip\/(.+)$/);
+      if (tripMatch) return { view: 'mobile_view', tripId: tripMatch[1] };
+      if (h.startsWith('#/settings')) return { view: 'settings' };
+      return { view: 'dashboard' };
+    }
+
+    function navigate(hash) {
+      window.location.hash = hash;
+    }
+
+    function buildShareUrl(code) {
+      const url = new URL(window.location.href);
+      url.search = `?family=${encodeURIComponent(code)}`;
+      url.hash = '';
+      return url.toString();
+    }
+
+    function copyToClipboard(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+      }
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (_) { /* noop */ }
+      document.body.removeChild(ta);
+      return Promise.resolve();
+    }
+
+    function lsGet(key) {
+      try { return localStorage.getItem(key); } catch (_) { return null; }
+    }
+    function lsSet(key, value) {
+      try { localStorage.setItem(key, value); } catch (_) { /* noop */ }
+    }
+
+    function fmtRelativeTime(ts) {
+      if (!ts) return '';
+      const d = ts.toDate ? ts.toDate() : (ts instanceof Date ? ts : new Date(ts));
+      const diff = Date.now() - d.getTime();
+      const m = Math.floor(diff / 60000);
+      if (m < 1) return '剛剛';
+      if (m < 60) return `${m} 分鐘前`;
+      const h = Math.floor(m / 60);
+      if (h < 24) return `${h} 小時前`;
+      const days = Math.floor(h / 24);
+      if (days < 30) return `${days} 天前`;
+      return d.toLocaleDateString('zh-TW');
+    }
+
+    // ================================================================
+    // 通用 UI 元件
+    // ================================================================
+    function LoadingScreen({ message = '載入中...' }) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center gap-4 bg-slate-50">
+          <div className="animate-spin h-12 w-12 border-4 border-blue-500 border-t-transparent rounded-full"></div>
+          <p className="text-slate-600">{message}</p>
+        </div>
+      );
+    }
+
+    function ErrorScreen({ title = '發生錯誤', message, hint, showReload = true }) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center gap-4 bg-slate-50 p-6">
+          <div className="text-6xl">⚠️</div>
+          <h2 className="text-xl font-bold text-slate-800">{title}</h2>
+          <p className="text-slate-600 text-center max-w-md whitespace-pre-wrap">{message}</p>
+          {hint && <p className="text-sm text-slate-500 text-center max-w-md">{hint}</p>}
+          {showReload && (
+            <button onClick={() => window.location.reload()} className="mt-4 px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
+              重新整理
+            </button>
+          )}
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 登入畫面(規劃者)
+    // ================================================================
+    function LoginScreen({ onLogin, busy }) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center gap-6 bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+          <div className="text-7xl">🚗</div>
+          <h1 className="text-3xl font-bold text-slate-800">智慧旅遊規劃書</h1>
+          <p className="text-slate-600 text-center max-w-md">
+            為您與家人量身打造的旅遊規劃工具
+            <br />
+            <span className="text-sm text-slate-500">電腦規劃 · 手機隨身查看 · 家人即時同步</span>
+          </p>
+          <button
+            onClick={onLogin}
+            disabled={busy}
+            className="mt-4 flex items-center gap-3 px-6 py-3 bg-white text-slate-700 border border-slate-300 rounded-lg shadow-md hover:shadow-lg disabled:opacity-50 transition"
+          >
+            {busy ? (
+              <span className="inline-block animate-spin h-5 w-5 border-2 border-slate-500 border-t-transparent rounded-full"></span>
+            ) : (
+              <svg className="w-5 h-5" viewBox="0 0 24 24">
+                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" />
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
+              </svg>
+            )}
+            使用 Google 登入
+          </button>
+          <p className="text-xs text-slate-500 mt-2">登入後可在所有裝置看到您的歷史行程</p>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 家人首次設定 Modal
+    // ================================================================
+    function FamilyJoinModal({ ownerName, defaultNickname = '', onComplete }) {
+      const [nickname, setNickname] = useState(defaultNickname);
+      const [icon, setIcon] = useState(ICON_OPTIONS[0]);
+      const [color, setColor] = useState(COLOR_OPTIONS[0].value);
+      const [shareLocation, setShareLocation] = useState(true);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(null);
+
+      const handleSubmit = async () => {
+        if (!nickname.trim()) {
+          setError('請輸入您的稱呼');
+          return;
+        }
+        setBusy(true);
+        setError(null);
+        try {
+          await onComplete({ nickname: nickname.trim(), icon, color, shareLocation });
+        } catch (e) {
+          console.error(e);
+          setError('儲存失敗:' + (e.message || e));
+          setBusy(false);
+        }
+      };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+          <div className="bg-white rounded-2xl shadow-xl p-6 max-w-md w-full">
+            <div className="text-center mb-6">
+              <div className="text-5xl mb-2">👋</div>
+              <h2 className="text-2xl font-bold text-slate-800">歡迎加入 {ownerName || '此家庭'}</h2>
+              <p className="text-slate-600 text-sm mt-1">請設定您的個人資訊,讓家人認得您</p>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">您的稱呼 <span className="text-red-500">*</span></label>
+                <input
+                  type="text"
+                  value={nickname}
+                  onChange={(e) => setNickname(e.target.value)}
+                  placeholder="例如:媽媽、阿姨、舅舅..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  maxLength={20}
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">選擇圖示</label>
+                <div className="grid grid-cols-8 gap-2">
+                  {ICON_OPTIONS.map((ic) => (
+                    <button
+                      key={ic}
+                      type="button"
+                      onClick={() => setIcon(ic)}
+                      className={`text-2xl py-2 rounded-lg border-2 transition ${icon === ic ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}
+                    >
+                      {ic}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">選擇顏色</label>
+                <div className="grid grid-cols-6 gap-2">
+                  {COLOR_OPTIONS.map((c) => (
+                    <button
+                      key={c.value}
+                      type="button"
+                      onClick={() => setColor(c.value)}
+                      className={`h-10 rounded-lg border-4 transition ${color === c.value ? 'border-slate-700' : 'border-transparent'}`}
+                      style={{ backgroundColor: c.value }}
+                      title={c.name}
+                    ></button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
+                <div>
+                  <div className="text-sm font-medium text-slate-700">分享我的位置</div>
+                  <div className="text-xs text-slate-500">讓家人在地圖上看到您</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShareLocation(!shareLocation)}
+                  className={`relative w-12 h-6 rounded-full transition ${shareLocation ? 'bg-blue-500' : 'bg-slate-300'}`}
+                >
+                  <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition-all ${shareLocation ? 'left-6' : 'left-0.5'}`}></span>
+                </button>
+              </div>
+            </div>
+
+            {error && (
+              <div className="mt-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
+            )}
+
+            <button
+              onClick={handleSubmit}
+              disabled={busy || !nickname.trim()}
+              className="mt-6 w-full py-3 bg-blue-500 text-white rounded-lg font-medium hover:bg-blue-600 disabled:opacity-50 transition"
+            >
+              {busy ? '儲存中...' : '完成設定'}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 家庭分享連結區塊
+    // ================================================================
+    function ShareLinkBox({ shareCode }) {
+      const [copied, setCopied] = useState(false);
+      const [showQR, setShowQR] = useState(false);
+      const url = shareCode ? buildShareUrl(shareCode) : '';
+
+      const handleCopy = () => {
+        copyToClipboard(url).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        });
+      };
+
+      const handleLine = () => {
+        const text = `家庭旅遊計劃連結:${url}`;
+        window.open(`https://line.me/R/msg/text/?${encodeURIComponent(text)}`, '_blank');
+      };
+
+      if (!shareCode) {
+        return (
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+            家庭分享連結正在產生中...
+          </div>
+        );
+      }
+
+      return (
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <span>👨‍👩‍👧</span>
+            <span className="font-medium text-slate-700">家庭分享連結</span>
+          </div>
+          <div className="bg-white rounded-lg px-3 py-2 text-xs font-mono text-slate-600 break-all mb-3">
+            {url}
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={handleCopy} className="px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-sm hover:bg-slate-50">
+              {copied ? '✓ 已複製' : '📋 複製'}
+            </button>
+            <button onClick={() => setShowQR(!showQR)} className="px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-sm hover:bg-slate-50">
+              📱 QR Code
+            </button>
+            <button onClick={handleLine} className="px-3 py-1.5 bg-green-500 text-white rounded-lg text-sm hover:bg-green-600">
+              💬 LINE 分享
+            </button>
+          </div>
+          {showQR && (
+            <div className="mt-3 bg-white p-3 rounded-lg flex justify-center">
+              <img
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(url)}`}
+                alt="QR Code"
+                className="w-52 h-52"
+              />
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 行程卡片(Dashboard 中使用)
+    // ================================================================
+    function TripCard({ trip, variant }) {
+      const locCount = (trip.days || []).reduce((s, d) => s + (d.locations || []).length, 0);
+      const dayCount = (trip.days || []).length;
+      const statusBadge = {
+        draft: { label: '草稿', color: 'bg-slate-100 text-slate-600' },
+        active: { label: '進行中', color: 'bg-green-100 text-green-700' },
+        completed: { label: '已完成', color: 'bg-blue-100 text-blue-700' },
+        archived: { label: '已封存', color: 'bg-slate-100 text-slate-500' },
+      }[trip.status || 'draft'];
+
+      return (
+        <div className="bg-white rounded-xl border border-slate-200 p-4 mb-2 shadow-sm">
+          <div className="flex items-start justify-between gap-2 mb-2">
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <h3 className="font-semibold text-slate-800">{trip.title || '未命名行程'}</h3>
+                {statusBadge && (
+                  <span className={`text-xs px-2 py-0.5 rounded-full ${statusBadge.color}`}>{statusBadge.label}</span>
+                )}
+              </div>
+              {trip.startDate && (
+                <p className="text-xs text-slate-500 mt-0.5">{trip.startDate}{dayCount > 1 ? ` · 共 ${dayCount} 天` : ''}</p>
+              )}
+            </div>
+          </div>
+          <div className="text-sm text-slate-600 mb-3">
+            {locCount === 0 ? '尚未加入地點' : `已規劃 ${locCount} 個地點`}
+          </div>
+          <div className="flex gap-2 flex-wrap">
+            <button onClick={() => navigate(`#/edit/${trip.id}`)} className="text-sm px-3 py-1.5 bg-slate-100 rounded-lg hover:bg-slate-200">
+              ✏️ 編輯
+            </button>
+            {variant === 'active' && (
+              <button onClick={() => navigate(`#/trip/${trip.id}`)} className="text-sm px-3 py-1.5 bg-blue-500 text-white rounded-lg hover:bg-blue-600">
+                📱 旅程模式
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // Dashboard(規劃者首頁)
+    // ================================================================
+    function Dashboard({ user, profile, onSignOut }) {
+      const [trips, setTrips] = useState([]);
+      const [creating, setCreating] = useState(false);
+      const [showHistory, setShowHistory] = useState(false);
+
+      useEffect(() => {
+        if (!user) return;
+        const unsub = paths.userTrips(user.uid).orderBy('updatedAt', 'desc').onSnapshot(
+          (snap) => {
+            const list = [];
+            snap.forEach((doc) => list.push({ id: doc.id, ...doc.data() }));
+            setTrips(list);
+          },
+          (err) => console.error('[Dashboard] trip listener error', err)
+        );
+        return unsub;
+      }, [user]);
+
+      const handleCreate = async () => {
+        setCreating(true);
+        try {
+          const ref = await paths.userTrips(user.uid).add({
+            title: '新行程',
+            ownerUid: user.uid,
+            status: 'draft',
+            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+            startDate: '',
+            departureTime: '09:00',
+            notes: '',
+            activeMembers: [],
+            days: [{ dayNumber: 1, date: '', locations: [] }],
+            expenses: [],
+          });
+          navigate(`#/edit/${ref.id}`);
+        } catch (e) {
+          console.error(e);
+          alert('建立失敗:' + (e.message || e));
+        } finally {
+          setCreating(false);
+        }
+      };
+
+      const active = trips.filter((t) => t.status === 'active');
+      const draftOrUpcoming = trips.filter((t) =>
+        (t.status === 'draft' || !t.status) ||
+        (t.status !== 'active' && t.status !== 'completed' && t.status !== 'archived')
+      );
+      const history = trips.filter((t) => t.status === 'completed' || t.status === 'archived');
+
+      return (
+        <div className="max-w-3xl mx-auto p-4 sm:p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-bold text-slate-800">🚗 智慧旅遊規劃書</h1>
+              <p className="text-sm text-slate-500">{profile?.nickname || user.displayName}'s Family</p>
+            </div>
+            <div className="flex gap-1">
+              <button onClick={() => navigate('#/family')} title="家人名單" className="text-2xl p-2 rounded-lg hover:bg-slate-200">👨‍👩‍👧</button>
+              <button onClick={() => navigate('#/settings')} title="設定" className="text-2xl p-2 rounded-lg hover:bg-slate-200">⚙️</button>
+            </div>
+          </div>
+
+          <ShareLinkBox shareCode={profile?.familyShareCode} />
+
+          <button
+            onClick={handleCreate}
+            disabled={creating}
+            className="w-full py-4 bg-blue-500 text-white rounded-xl text-lg font-medium hover:bg-blue-600 disabled:opacity-50 shadow-md transition"
+          >
+            {creating ? '建立中...' : '+ 建立新計畫'}
+          </button>
+
+          {active.length > 0 && (
+            <div>
+              <h2 className="text-sm font-medium text-slate-500 mb-2">🟢 進行中</h2>
+              {active.map((t) => <TripCard key={t.id} trip={t} variant="active" />)}
+            </div>
+          )}
+
+          {draftOrUpcoming.length > 0 && (
+            <div>
+              <h2 className="text-sm font-medium text-slate-500 mb-2">📅 草稿 / 即將前往</h2>
+              {draftOrUpcoming.map((t) => <TripCard key={t.id} trip={t} variant="upcoming" />)}
+            </div>
+          )}
+
+          {history.length > 0 && (
+            <div>
+              <button
+                onClick={() => setShowHistory(!showHistory)}
+                className="w-full text-left text-sm font-medium text-slate-500 mb-2 flex items-center gap-2"
+              >
+                <span>{showHistory ? '▼' : '▶'}</span>
+                <span>📜 歷史行程 ({history.length})</span>
+              </button>
+              {showHistory && history.map((t) => <TripCard key={t.id} trip={t} variant="history" />)}
+            </div>
+          )}
+
+          {trips.length === 0 && (
+            <div className="text-center py-12 text-slate-500">
+              <div className="text-5xl mb-3">🗺️</div>
+              <p>還沒有任何計畫</p>
+              <p className="text-sm mt-1">點上方「+ 建立新計畫」開始規劃</p>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 家人名單頁
+    // ================================================================
+    function FamilyListPage({ user, profile }) {
+      const [members, setMembers] = useState([]);
+
+      useEffect(() => {
+        if (!user) return;
+        const unsub = paths.knownFamily(user.uid).onSnapshot(
+          (snap) => {
+            const list = [];
+            snap.forEach((doc) => list.push({ id: doc.id, ...doc.data() }));
+            list.sort((a, b) => (b.totalTrips || 0) - (a.totalTrips || 0));
+            setMembers(list);
+          },
+          (err) => console.error('[FamilyList] listener error', err)
+        );
+        return unsub;
+      }, [user]);
+
+      return (
+        <div className="max-w-3xl mx-auto p-4 sm:p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <button onClick={() => navigate('#/')} className="p-2 hover:bg-slate-200 rounded-lg">←</button>
+            <h1 className="text-2xl font-bold text-slate-800">👨‍👩‍👧 家人名單</h1>
+          </div>
+
+          <ShareLinkBox shareCode={profile?.familyShareCode} />
+
+          <div className="bg-white rounded-xl border border-slate-200 p-4">
+            <p className="text-sm text-slate-600 mb-3">
+              已加入家人:<span className="font-semibold">{members.length}</span> 位
+            </p>
+
+            {members.length === 0 ? (
+              <div className="text-center py-8 text-slate-500 text-sm">
+                <p>還沒有家人加入</p>
+                <p className="mt-1">請分享上方連結邀請家人</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {members.map((m) => (
+                  <div key={m.id} className="py-3 flex items-center gap-3">
+                    <div
+                      className="w-10 h-10 rounded-full flex items-center justify-center text-xl flex-shrink-0"
+                      style={{ backgroundColor: m.color || '#e2e8f0' }}
+                    >
+                      {m.icon || '👤'}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-slate-800 truncate">{m.nickname || '未命名'}</div>
+                      <div className="text-xs text-slate-500">
+                        參加 {m.totalTrips || 0} 次
+                        {m.lastSeenAt && ` · 最後 ${fmtRelativeTime(m.lastSeenAt)}`}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <p className="text-xs text-slate-400 text-center">Phase 1 顯示基本名單,編輯/移除/合併功能將在 Phase 5 加入</p>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 設定頁
+    // ================================================================
+    function SettingsPage({ user, profile, onSignOut }) {
+      return (
+        <div className="max-w-3xl mx-auto p-4 sm:p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <button onClick={() => navigate('#/')} className="p-2 hover:bg-slate-200 rounded-lg">←</button>
+            <h1 className="text-2xl font-bold text-slate-800">⚙️ 設定</h1>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
+            <div>
+              <label className="text-xs text-slate-500">登入帳號</label>
+              <div className="text-slate-800">{user.email}</div>
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">顯示名稱</label>
+              <div className="text-slate-800">{profile?.nickname || user.displayName}</div>
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">家庭分享碼</label>
+              <div className="text-slate-800 font-mono">{profile?.familyShareCode}</div>
+            </div>
+            <div>
+              <label className="text-xs text-slate-500">使用者 UID(供除錯)</label>
+              <div className="text-slate-500 font-mono text-xs break-all">{user.uid}</div>
+            </div>
+          </div>
+
+          <button
+            onClick={async () => {
+              if (window.confirm('確定要登出嗎?')) {
+                await auth.signOut();
+                window.location.hash = '#/';
+                window.location.reload();
+              }
+            }}
+            className="w-full py-3 bg-slate-100 text-slate-700 rounded-lg hover:bg-slate-200"
+          >
+            登出
+          </button>
+
+          <p className="text-xs text-slate-400 text-center">Phase 1 設定頁(更多選項將在後續階段加入)</p>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // Editor 占位(Phase 3 才填充內容)
+    // ================================================================
+    function EditorView({ user, tripId }) {
+      const [trip, setTrip] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [editingTitle, setEditingTitle] = useState(false);
+      const [titleInput, setTitleInput] = useState('');
+
+      useEffect(() => {
+        if (!user || !tripId) return;
+        const unsub = paths.userTrip(user.uid, tripId).onSnapshot(
+          (doc) => {
+            if (doc.exists) {
+              const data = { id: doc.id, ...doc.data() };
+              setTrip(data);
+              if (!editingTitle) setTitleInput(data.title || '');
+            } else {
+              setTrip(null);
+            }
+            setLoading(false);
+          },
+          (e) => { console.error(e); setLoading(false); }
+        );
+        return unsub;
+      }, [user, tripId]);
+
+      const saveTitle = async () => {
+        if (!titleInput.trim()) return;
+        try {
+          await paths.userTrip(user.uid, tripId).update({
+            title: titleInput.trim(),
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+          setEditingTitle(false);
+        } catch (e) {
+          alert('儲存失敗:' + (e.message || e));
+        }
+      };
+
+      const handleDelete = async () => {
+        if (!window.confirm(`確定要刪除「${trip.title}」嗎?此動作無法復原。`)) return;
+        try {
+          await paths.userTrip(user.uid, tripId).delete();
+          navigate('#/');
+        } catch (e) {
+          alert('刪除失敗:' + (e.message || e));
+        }
+      };
+
+      if (loading) return <LoadingScreen message="載入行程..." />;
+      if (!trip) return <ErrorScreen title="找不到此行程" message="這個行程可能已被刪除,或網址錯誤" />;
+
+      return (
+        <div className="max-w-5xl mx-auto p-4 sm:p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <button onClick={() => navigate('#/')} className="p-2 hover:bg-slate-200 rounded-lg">←</button>
+            {editingTitle ? (
+              <input
+                type="text"
+                value={titleInput}
+                onChange={(e) => setTitleInput(e.target.value)}
+                onBlur={saveTitle}
+                onKeyDown={(e) => e.key === 'Enter' && saveTitle()}
+                className="flex-1 text-xl font-bold px-2 py-1 border border-slate-300 rounded"
+                autoFocus
+              />
+            ) : (
+              <h1
+                className="text-xl font-bold text-slate-800 flex-1 cursor-pointer hover:bg-slate-100 px-2 py-1 rounded flex items-center gap-2 group"
+                onClick={() => setEditingTitle(true)}
+                title="點擊編輯"
+              >
+                <span>{trip.title}</span>
+                <span className="text-sm text-slate-400 opacity-60 group-hover:opacity-100 transition">✏️</span>
+              </h1>
+            )}
+          </div>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+            <p className="font-medium mb-1">🚧 Phase 1 階段:Editor 為基本骨架</p>
+            <p>完整編輯功能(搜尋地點、地圖、拖拉排序、多天行程、費用統計)將在 Phase 2 ~ Phase 3 開發。</p>
+            <p className="mt-1 text-xs">目前可改標題、刪除行程,作為 Firestore 寫入測試。</p>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-4">
+            <div className="text-xs text-slate-500 mb-2">行程資料(供除錯)</div>
+            <pre className="text-xs text-slate-600 overflow-auto whitespace-pre-wrap">{JSON.stringify({
+              id: trip.id,
+              title: trip.title,
+              status: trip.status,
+              startDate: trip.startDate,
+              departureTime: trip.departureTime,
+              dayCount: (trip.days || []).length,
+              locationCount: (trip.days || []).reduce((s, d) => s + (d.locations || []).length, 0),
+              activeMembers: (trip.activeMembers || []).length,
+            }, null, 2)}</pre>
+          </div>
+
+          <button onClick={handleDelete} className="w-full py-2 bg-red-50 border border-red-200 text-red-600 rounded-lg hover:bg-red-100 text-sm">
+            🗑️ 刪除此行程
+          </button>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // Mobile Trip View(規劃者&家人共用基本骨架)
+    // ================================================================
+    function MobileTripView({ user, tripId, ownerName, viewerProfile, sharedTripData, isViewer }) {
+      // 規劃者進入(從 Dashboard 點某行程):tripId 有值,但 Phase 4 才實作
+      // 家人觀看者進入(?family=...):sharedTripData 有值或 null
+      const data = sharedTripData;
+
+      return (
+        <div className="max-w-md mx-auto p-4 space-y-4 min-h-screen">
+          <div className="flex items-center gap-2">
+            {!isViewer && (
+              <button onClick={() => navigate('#/')} className="p-2 hover:bg-slate-200 rounded-lg">←</button>
+            )}
+            <h1 className="text-xl font-bold text-slate-800 flex-1">
+              {ownerName ? `${ownerName}'s Family` : '📱 旅程模式'}
+            </h1>
+          </div>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+            <p className="font-medium mb-1">🚧 Phase 1 階段:Mobile View 為基本骨架</p>
+            <p>完整功能(導航卡片、多人位置、進度條、沿途推薦)將在 Phase 4 ~ Phase 5 開發。</p>
+          </div>
+
+          {isViewer && viewerProfile && (
+            <div className="bg-white rounded-xl border border-slate-200 p-4 flex items-center gap-3">
+              <div
+                className="w-12 h-12 rounded-full flex items-center justify-center text-2xl"
+                style={{ backgroundColor: viewerProfile.color }}
+              >
+                {viewerProfile.icon}
+              </div>
+              <div>
+                <div className="font-semibold text-slate-800">{viewerProfile.nickname}</div>
+                <div className="text-xs text-slate-500">
+                  位置分享:{viewerProfile.shareLocation ? '開啟' : '關閉'}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {data ? (
+            <div className="bg-white rounded-xl border border-slate-200 p-4">
+              <h2 className="font-semibold text-slate-800 mb-1">📍 {data.title || '未命名行程'}</h2>
+              <p className="text-sm text-slate-600">狀態:{data.status || 'draft'}</p>
+            </div>
+          ) : (
+            <div className="bg-white rounded-xl border border-slate-200 p-6 text-center text-slate-500">
+              <div className="text-4xl mb-2">🗓️</div>
+              <p>目前沒有進行中的行程</p>
+              {isViewer && <p className="text-xs mt-2">當規劃者啟動行程時會自動顯示在這</p>}
+            </div>
+          )}
+
+          {tripId && !isViewer && (
+            <div className="bg-white rounded-xl border border-slate-200 p-4 text-sm text-slate-500">
+              <div>Trip ID: <span className="font-mono">{tripId}</span></div>
+              <div className="mt-1">規劃者旅程模式 Phase 4 才實作</div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ================================================================
+    // App Root
+    // ================================================================
+    function App() {
+      // 狀態 ===
+      const [authReady, setAuthReady] = useState(false);
+      const [user, setUser] = useState(null);
+      const [profile, setProfile] = useState(null);
+      const [profileLoading, setProfileLoading] = useState(false);
+      const [route, setRoute] = useState(parseRoute());
+
+      const [familyCodeUrl] = useState(getUrlFamilyCode());
+      const [familyOwner, setFamilyOwner] = useState(null);
+      const [familyOwnerError, setFamilyOwnerError] = useState(null);
+      const [viewerProfile, setViewerProfile] = useState(null);
+      const [needsFamilySetup, setNeedsFamilySetup] = useState(false);
+      const [sharedTripData, setSharedTripData] = useState(null);
+
+      const [googleBusy, setGoogleBusy] = useState(false);
+      const [appError, setAppError] = useState(firebaseInitError);
+
+      const isViewer = !!familyCodeUrl;
+
+      // === Hash 路由監聽 ===
+      useEffect(() => {
+        const handler = () => setRoute(parseRoute());
+        window.addEventListener('hashchange', handler);
+        return () => window.removeEventListener('hashchange', handler);
+      }, []);
+
+      // === Auth state listener(規劃者 Google + 觀看者匿名)===
+      useEffect(() => {
+        if (!auth) return;
+        const unsub = auth.onAuthStateChanged(async (u) => {
+          if (isViewer && !u) {
+            try {
+              await auth.signInAnonymously();
+              return; // 等下一輪 onAuthStateChanged
+            } catch (e) {
+              console.error('[Auth] anonymous sign-in failed', e);
+              setAppError('匿名登入失敗:' + (e.message || e));
+              setAuthReady(true);
+              return;
+            }
+          }
+          setUser(u);
+          setAuthReady(true);
+        });
+        return unsub;
+      }, [isViewer]);
+
+      // === 規劃者:載入或建立 profile ===
+      useEffect(() => {
+        if (isViewer || !user) return;
+        setProfileLoading(true);
+        let unsub = null;
+        (async () => {
+          try {
+            const ref = paths.user(user.uid);
+            const snap = await ref.get();
+            if (!snap.exists) {
+              // 首次登入:建立 profile + shared_family
+              const baseName = user.displayName || (user.email && user.email.split('@')[0]) || 'User';
+              const baseCode = generateFamilyShareCode(baseName);
+              const code = await ensureUniqueFamilyShareCode(baseCode, user.uid);
+              const newProfile = {
+                nickname: baseName,
+                email: user.email || '',
+                icon: '🚙',
+                color: '#3B82F6',
+                familyShareCode: code,
+                createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+              };
+              await ref.set(newProfile);
+              await paths.sharedFamily(code).set({
+                ownerUid: user.uid,
+                ownerName: baseName,
+                activeTripId: null,
+                recentTrips: [],
+                createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+              });
+              console.log('[Profile] created for new user', { uid: user.uid, code });
+            }
+            unsub = ref.onSnapshot((doc) => {
+              if (doc.exists) setProfile(doc.data());
+              setProfileLoading(false);
+            }, (e) => {
+              console.error('[Profile] listener error', e);
+              setProfileLoading(false);
+            });
+          } catch (e) {
+            console.error('[Profile] setup failed', e);
+            setAppError('個人資料載入失敗:' + (e.message || e) + '\n\n可能原因:Firestore 規則未正確設定。');
+            setProfileLoading(false);
+          }
+        })();
+        return () => { if (unsub) unsub(); };
+      }, [isViewer, user]);
+
+      // === 觀看者:讀取家庭資訊 ===
+      useEffect(() => {
+        if (!isViewer || !user) return;
+        paths.sharedFamily(familyCodeUrl).get()
+          .then((snap) => {
+            if (!snap.exists) {
+              setFamilyOwnerError(`找不到分享碼「${familyCodeUrl}」,請確認網址是否正確`);
+              return;
+            }
+            setFamilyOwner({ shareCode: familyCodeUrl, ...snap.data() });
+          })
+          .catch((e) => {
+            console.error('[Viewer] load family failed', e);
+            setFamilyOwnerError('讀取家庭資訊失敗:' + (e.message || e));
+          });
+      }, [isViewer, user, familyCodeUrl]);
+
+      // === 觀看者:檢查 localStorage 是否已有 profile ===
+      useEffect(() => {
+        if (!isViewer || !familyCodeUrl || !user) return;
+        const key = LS_VIEWER_PROFILE_PREFIX + familyCodeUrl;
+        const stored = lsGet(key);
+        if (stored) {
+          try {
+            const p = JSON.parse(stored);
+            setViewerProfile(p);
+            return;
+          } catch (_) { /* fall through */ }
+        }
+        setNeedsFamilySetup(true);
+      }, [isViewer, familyCodeUrl, user]);
+
+      // === 觀看者:訂閱當前活躍行程 ===
+      useEffect(() => {
+        if (!isViewer || !familyOwner) return;
+        if (!familyOwner.activeTripId) {
+          setSharedTripData(null);
+          return;
+        }
+        const unsub = paths.sharedTrip(familyOwner.activeTripId).onSnapshot(
+          (doc) => {
+            if (doc.exists) setSharedTripData({ id: doc.id, ...doc.data() });
+            else setSharedTripData(null);
+          },
+          (e) => console.warn('[Viewer] shared_trips listener', e)
+        );
+        return unsub;
+      }, [isViewer, familyOwner]);
+
+      // === Handlers ===
+      const handleGoogleLogin = async () => {
+        setGoogleBusy(true);
+        try {
+          const provider = new firebase.auth.GoogleAuthProvider();
+          await auth.signInWithPopup(provider);
+        } catch (e) {
+          console.error('[Auth] Google login failed', e);
+          if (e.code === 'auth/popup-closed-by-user' || e.code === 'auth/cancelled-popup-request') {
+            // 使用者自己關掉,不噴錯
+          } else if (e.code === 'auth/popup-blocked') {
+            alert('瀏覽器阻擋了登入彈窗,請允許彈出視窗後重試');
+          } else {
+            alert('登入失敗:' + (e.message || e));
+          }
+        } finally {
+          setGoogleBusy(false);
+        }
+      };
+
+      const handleFamilySetupComplete = async ({ nickname, icon, color, shareLocation }) => {
+        if (!user || !familyOwner) throw new Error('尚未準備好');
+
+        // 1. 寫入 known_family(在規劃者空間)
+        await paths.knownFamilyMember(familyOwner.ownerUid, user.uid).set({
+          nickname,
+          icon,
+          color,
+          shareLocation,
+          firstSeenAt: firebase.firestore.FieldValue.serverTimestamp(),
+          lastSeenAt: firebase.firestore.FieldValue.serverTimestamp(),
+          totalTrips: 1,
+        }, { merge: true });
+
+        // 2. 若有活躍行程,寫入 participants
+        if (familyOwner.activeTripId) {
+          try {
+            await paths.participant(familyOwner.activeTripId, user.uid).set({
+              nickname,
+              icon,
+              color,
+              shareLocation,
+              lastUpdate: firebase.firestore.FieldValue.serverTimestamp(),
+            }, { merge: true });
+          } catch (e) {
+            console.warn('[Viewer] participant write failed', e);
+          }
+        }
+
+        // 3. localStorage(裝置記住,下次不再問)
+        const profileObj = { nickname, icon, color, shareLocation };
+        lsSet(LS_VIEWER_PROFILE_PREFIX + familyCodeUrl, JSON.stringify(profileObj));
+        setViewerProfile(profileObj);
+        setNeedsFamilySetup(false);
+      };
+
+      // === Render ===
+      if (appError) {
+        return <ErrorScreen
+          title="無法啟動"
+          message={appError}
+          hint="請確認 config.js 設定正確,且 Firestore 安全規則已部署最新版本"
+        />;
+      }
+
+      if (!authReady) return <LoadingScreen message="正在連線 Firebase..." />;
+
+      // === 觀看者模式 ===
+      if (isViewer) {
+        if (familyOwnerError) return <ErrorScreen title="無法載入家庭資訊" message={familyOwnerError} />;
+        if (!familyOwner) return <LoadingScreen message="載入家庭資訊..." />;
+        if (needsFamilySetup) {
+          return (
+            <FamilyJoinModal
+              ownerName={familyOwner.ownerName}
+              onComplete={handleFamilySetupComplete}
+            />
+          );
+        }
+        return (
+          <MobileTripView
+            user={user}
+            ownerName={familyOwner.ownerName}
+            viewerProfile={viewerProfile}
+            sharedTripData={sharedTripData}
+            isViewer={true}
+          />
+        );
+      }
+
+      // === 規劃者模式 ===
+      if (!user) return <LoginScreen onLogin={handleGoogleLogin} busy={googleBusy} />;
+      if (profileLoading || !profile) return <LoadingScreen message="載入個人資料..." />;
+
+      switch (route.view) {
+        case 'family_list': return <FamilyListPage user={user} profile={profile} />;
+        case 'editor': return <EditorView user={user} tripId={route.tripId} />;
+        case 'mobile_view': return <MobileTripView user={user} tripId={route.tripId} isViewer={false} />;
+        case 'settings': return <SettingsPage user={user} profile={profile} />;
+        default: return <Dashboard user={user} profile={profile} />;
+      }
+    }
+
+    // ================================================================
+    // Render
+    // ================================================================
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
