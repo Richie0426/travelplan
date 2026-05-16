@@ -54,6 +54,17 @@
     ];
     const LS_VIEWER_PROFILE_PREFIX = 'tw-travel-viewer-profile:';
 
+    // ---- Phase 2:POI 與搜尋 ----
+    const POI_CACHE_KEY = 'tw-travel-poi-cache';
+    const POI_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 天
+    const POI_APIS = [
+      { url: 'https://media.taiwan.net.tw/XMLReleaseALL_public/scenic_spot_C_f.json', category: 'scenic', label: '景點' },
+      { url: 'https://media.taiwan.net.tw/XMLReleaseALL_public/restaurant_C_f.json', category: 'restaurant', label: '餐廳' },
+      { url: 'https://media.taiwan.net.tw/XMLReleaseALL_public/hotel_C_f.json', category: 'hotel', label: '住宿' },
+    ];
+    const CORS_PROXY = 'https://corsproxy.io/?'; // 觀光署 API 若 CORS 失敗時的備援
+    const TAIWAN_CENTER = [23.9737, 120.9797];
+
     // ================================================================
     // Firebase 初始化
     // ================================================================
@@ -171,6 +182,208 @@
       const days = Math.floor(h / 24);
       if (days < 30) return `${days} 天前`;
       return d.toLocaleDateString('zh-TW');
+    }
+
+    function generateLocationId() {
+      return `loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    // ================================================================
+    // POI 資料下載與快取(觀光署開放資料)
+    // ================================================================
+    function extractTwPOIItems(data) {
+      if (!data) return [];
+      if (Array.isArray(data)) return data;
+      if (data.XML_Head?.Infos?.Info) return data.XML_Head.Infos.Info;
+      if (data.XML_Head?.Infos) return data.XML_Head.Infos;
+      if (data.Infos?.Info) return data.Infos.Info;
+      if (data.Info) return data.Info;
+      if (data.data) return data.data;
+      return [];
+    }
+    function extractField(item, ...keys) {
+      for (const k of keys) {
+        const v = item[k];
+        if (v !== undefined && v !== null && v !== '') return v;
+      }
+      return '';
+    }
+    async function fetchOneTwApi(api) {
+      const tryFetch = async (url) => {
+        const r = await fetch(url, { mode: 'cors' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      };
+      let data;
+      try {
+        data = await tryFetch(api.url);
+      } catch (e) {
+        console.warn(`[POI] direct fetch failed for ${api.label}, trying CORS proxy`, e.message);
+        data = await tryFetch(CORS_PROXY + encodeURIComponent(api.url));
+      }
+      const raw = extractTwPOIItems(data);
+      const items = [];
+      for (let i = 0; i < raw.length; i++) {
+        const it = raw[i];
+        const name = String(extractField(it, 'Name', 'ScenicSpotName', 'RestaurantName', 'HotelName', 'name') || '').trim();
+        const lat = parseFloat(extractField(it, 'Py', 'PositionLat', 'lat', 'Latitude'));
+        const lon = parseFloat(extractField(it, 'Px', 'PositionLon', 'lon', 'Longitude'));
+        if (!name || !isFinite(lat) || !isFinite(lon) || lat === 0 || lon === 0) continue;
+        items.push({
+          id: `tw_${api.category}_${extractField(it, 'Id', 'ScenicSpotID', 'RestaurantID', 'HotelID') || i}`,
+          name,
+          address: String(extractField(it, 'Address', 'Add', 'address') || '').trim(),
+          lat, lon,
+          category: api.category,
+          opening_hours: String(extractField(it, 'Opentime', 'OpenTime', 'opening_hours') || '').trim(),
+        });
+      }
+      return items;
+    }
+    async function fetchAllTwPOIs(onProgress) {
+      const all = [];
+      for (let i = 0; i < POI_APIS.length; i++) {
+        const api = POI_APIS[i];
+        if (onProgress) onProgress({ phase: 'loading', current: i, total: POI_APIS.length, label: api.label });
+        try {
+          const items = await fetchOneTwApi(api);
+          all.push(...items);
+        } catch (e) {
+          console.error(`[POI] failed to load ${api.label}`, e);
+        }
+      }
+      if (onProgress) onProgress({ phase: 'done', count: all.length });
+      return all;
+    }
+    async function loadTwPOIs({ forceRefresh = false, onProgress = null } = {}) {
+      if (!forceRefresh) {
+        try {
+          const cached = lsGet(POI_CACHE_KEY);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            if (parsed.lastUpdate && (Date.now() - parsed.lastUpdate) < POI_CACHE_TTL_MS && Array.isArray(parsed.items) && parsed.items.length > 0) {
+              if (onProgress) onProgress({ phase: 'cached', count: parsed.items.length });
+              return parsed.items;
+            }
+          }
+        } catch (e) {
+          console.warn('[POI] cache parse failed', e);
+        }
+      }
+      const items = await fetchAllTwPOIs(onProgress);
+      try {
+        lsSet(POI_CACHE_KEY, JSON.stringify({ lastUpdate: Date.now(), version: 1, items }));
+      } catch (e) {
+        console.warn('[POI] cache write failed (may exceed localStorage)', e);
+      }
+      return items;
+    }
+
+    // ================================================================
+    // 四層 fallback 搜尋
+    // ================================================================
+    function searchLocalPOI(query, twPOIs) {
+      if (!query || !twPOIs?.length) return [];
+      const q = query.trim();
+      // 1. 精確比對
+      const exact = twPOIs.filter((p) => p.name === q);
+      if (exact.length) return exact.slice(0, 20);
+      // 2. 關鍵字比對(所有 token 都要出現於 name 或 address)
+      const tokens = q.split(/\s+/).filter(Boolean);
+      const contains = twPOIs.filter((p) =>
+        tokens.every((t) => p.name.includes(t) || (p.address || '').includes(t))
+      );
+      if (contains.length) return contains.slice(0, 20);
+      // 3. 模糊比對(嚴格):避免拼湊式假匹配
+      // 3a. 明顯是地址的查詢 → 直接跳過,留給 OSM
+      const looksLikeAddress = /[縣市區鄉鎮村里巷弄號段]/.test(q) && q.length >= 6;
+      if (looksLikeAddress) return [];
+      // 3b. 過濾虛詞與通用地名字,再要求 ≥ 70% 字符出現於 name
+      const stripChars = '的之與和及以縣市區鄉鎮村里';
+      const chars = Array.from(q).filter((c) => c.trim() && !stripChars.includes(c));
+      if (chars.length < 3) return []; // 太短的查詢不做模糊
+      const fuzzy = [];
+      for (const p of twPOIs) {
+        let matchCount = 0;
+        for (const c of chars) if (p.name.includes(c)) matchCount++;
+        const ratio = matchCount / chars.length;
+        if (ratio >= 0.7) fuzzy.push({ p, ratio });
+      }
+      fuzzy.sort((a, b) => b.ratio - a.ratio);
+      return fuzzy.slice(0, 10).map((x) => x.p);
+    }
+
+    async function searchNominatim(query, { countryTw = true } = {}) {
+      const params = new URLSearchParams({
+        q: query,
+        format: 'json',
+        limit: '10',
+        'accept-language': 'zh-TW',
+      });
+      if (countryTw) params.set('countrycodes', 'tw');
+      const url = `https://nominatim.openstreetmap.org/search?${params}`;
+      const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      if (!resp.ok) throw new Error(`Nominatim HTTP ${resp.status}`);
+      const data = await resp.json();
+      return data.map((d) => ({
+        id: `osm_${d.osm_type}_${d.osm_id}`,
+        name: (d.display_name || '').split(',')[0],
+        originalName: d.display_name,
+        address: d.display_name,
+        lat: parseFloat(d.lat),
+        lon: parseFloat(d.lon),
+        category: d.class || '',
+        source: 'osm',
+      }));
+    }
+
+    async function reverseGeocode(lat, lon) {
+      try {
+        const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&accept-language=zh-TW`;
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        if (!resp.ok) throw new Error(`Nominatim HTTP ${resp.status}`);
+        const data = await resp.json();
+        return {
+          name: data.name || (data.display_name || '').split(',')[0] || `位置 ${lat.toFixed(4)},${lon.toFixed(4)}`,
+          address: data.display_name || '',
+        };
+      } catch (e) {
+        console.warn('[reverseGeocode] failed', e);
+        return { name: `位置 ${lat.toFixed(4)},${lon.toFixed(4)}`, address: '' };
+      }
+    }
+
+    function parseGoogleMapsUrl(url) {
+      if (!url) return null;
+      try {
+        const atMatch = url.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+        if (atMatch) {
+          return { lat: parseFloat(atMatch[1]), lon: parseFloat(atMatch[2]),
+            name: '從 Google Maps 匯入', address: url.length > 80 ? url.slice(0, 80) + '...' : url, source: 'gmaps_url' };
+        }
+        const dMatch = url.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+        if (dMatch) {
+          return { lat: parseFloat(dMatch[1]), lon: parseFloat(dMatch[2]),
+            name: '從 Google Maps 匯入', address: url.length > 80 ? url.slice(0, 80) + '...' : url, source: 'gmaps_url' };
+        }
+        try {
+          const u = new URL(url);
+          const q = u.searchParams.get('q');
+          if (q) {
+            const m = q.match(/^(-?\d+\.\d+),(-?\d+\.\d+)$/);
+            if (m) {
+              return { lat: parseFloat(m[1]), lon: parseFloat(m[2]),
+                name: '從 Google Maps 匯入', address: q, source: 'gmaps_url' };
+            }
+          }
+        } catch (_) { /* not a valid URL with query */ }
+      } catch (_) { /* noop */ }
+      return null;
+    }
+
+    function isGoogleMapsUrl(s) {
+      if (!s) return false;
+      return /google\.com\/maps|goo\.gl\/maps|maps\.app\.goo\.gl/.test(s);
     }
 
     // ================================================================
@@ -684,13 +897,290 @@
     }
 
     // ================================================================
-    // Editor 占位(Phase 3 才填充內容)
+    // 地圖元件(Leaflet)
     // ================================================================
-    function EditorView({ user, tripId }) {
+    function MapView({ locations, mapPinMode, onMapClick, focusLocationId }) {
+      const containerRef = useRef(null);
+      const mapRef = useRef(null);
+      const markersRef = useRef([]);
+      const clickHandlerRef = useRef(null);
+      const polylineRef = useRef(null);
+      const onMapClickRef = useRef(onMapClick);
+      useEffect(() => { onMapClickRef.current = onMapClick; }, [onMapClick]);
+
+      // 一次性初始化
+      useEffect(() => {
+        if (mapRef.current || !containerRef.current) return;
+        const map = L.map(containerRef.current, { zoomControl: true }).setView(TAIWAN_CENTER, 7);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+          maxZoom: 19,
+        }).addTo(map);
+        mapRef.current = map;
+        // 解 Leaflet 在彈性容器內初始尺寸問題
+        setTimeout(() => map.invalidateSize(), 100);
+        return () => { map.remove(); mapRef.current = null; };
+      }, []);
+
+      // 點擊監聽
+      useEffect(() => {
+        if (!mapRef.current) return;
+        if (clickHandlerRef.current) {
+          mapRef.current.off('click', clickHandlerRef.current);
+          clickHandlerRef.current = null;
+        }
+        if (mapPinMode) {
+          const h = (e) => onMapClickRef.current && onMapClickRef.current(e.latlng);
+          mapRef.current.on('click', h);
+          clickHandlerRef.current = h;
+        }
+        if (containerRef.current) {
+          containerRef.current.style.cursor = mapPinMode ? 'crosshair' : '';
+        }
+      }, [mapPinMode]);
+
+      // 渲染 markers + 連線
+      useEffect(() => {
+        if (!mapRef.current) return;
+        markersRef.current.forEach((m) => m.remove());
+        markersRef.current = [];
+        if (polylineRef.current) { polylineRef.current.remove(); polylineRef.current = null; }
+        if (!locations?.length) return;
+        const latlngs = [];
+        locations.forEach((loc, idx) => {
+          const isStart = idx === 0;
+          const isEnd = locations.length > 1 && idx === locations.length - 1;
+          const color = isStart ? '#10B981' : isEnd ? '#EF4444' : '#3B82F6';
+          const icon = L.divIcon({
+            className: 'custom-marker',
+            html: `<div style="background:${color};color:white;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:12px;border:2px solid white;box-shadow:0 1px 3px rgba(0,0,0,0.4);">${idx + 1}</div>`,
+            iconSize: [28, 28],
+            iconAnchor: [14, 14],
+          });
+          const marker = L.marker([loc.lat, loc.lon], { icon }).addTo(mapRef.current);
+          const safeName = (loc.name || '').replace(/</g, '&lt;');
+          const safeAddr = (loc.address || '').replace(/</g, '&lt;');
+          marker.bindPopup(`<b>${idx + 1}. ${safeName}</b>${safeAddr ? '<br><span style="font-size:11px;color:#666">' + safeAddr + '</span>' : ''}`);
+          latlngs.push([loc.lat, loc.lon]);
+          markersRef.current.push(marker);
+        });
+        if (latlngs.length > 1) {
+          polylineRef.current = L.polyline(latlngs, { color: '#3B82F6', weight: 2, opacity: 0.5, dashArray: '6, 4' }).addTo(mapRef.current);
+          mapRef.current.fitBounds(L.latLngBounds(latlngs), { padding: [40, 40], maxZoom: 14 });
+        } else if (latlngs.length === 1) {
+          mapRef.current.setView(latlngs[0], 14);
+        }
+      }, [locations]);
+
+      // 聚焦某個地點
+      useEffect(() => {
+        if (!mapRef.current || !focusLocationId) return;
+        const idx = locations.findIndex((l) => l.id === focusLocationId);
+        if (idx < 0) return;
+        const loc = locations[idx];
+        mapRef.current.flyTo([loc.lat, loc.lon], 15, { duration: 0.6 });
+        if (markersRef.current[idx]) markersRef.current[idx].openPopup();
+      }, [focusLocationId, locations]);
+
+      return (
+        <div className="relative">
+          <div ref={containerRef} className="w-full h-72 sm:h-[500px] rounded-xl border border-slate-200 bg-slate-100" />
+          {mapPinMode && (
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-blue-500 text-white text-xs px-3 py-1.5 rounded-full shadow-lg z-[1000] pointer-events-none">
+              🎯 點地圖任一處新增地點
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 搜尋面板(四層 fallback)
+    // ================================================================
+    function SearchPanel({ poiState, twPOIs, onAdd, mapPinMode, onToggleMapPin }) {
+      const [query, setQuery] = useState('');
+      const [results, setResults] = useState([]);
+      const [searching, setSearching] = useState(false);
+      const [sourceMsg, setSourceMsg] = useState('');
+      const [hint, setHint] = useState('');
+
+      useEffect(() => {
+        setHint('');
+        const q = query.trim();
+        if (!q) { setResults([]); setSourceMsg(''); return; }
+
+        // 第三層:Google Maps URL
+        if (isGoogleMapsUrl(q)) {
+          const parsed = parseGoogleMapsUrl(q);
+          if (parsed) {
+            setResults([{ ...parsed, id: generateLocationId() }]);
+            setSourceMsg('Google Maps 連結');
+            setSearching(false);
+          } else {
+            setResults([]);
+            setSourceMsg('');
+            setHint('無法從這個連結解析座標。請改用「點開分享 → 複製連結」拿完整網址(內含 @lat,lon)。');
+          }
+          return;
+        }
+
+        // 第一層→第二層:本地觀光署 → OSM
+        setSearching(true);
+        const timer = setTimeout(async () => {
+          const localResults = searchLocalPOI(q, twPOIs).map((p) => ({ ...p, source: 'tourism_bureau' }));
+          if (localResults.length > 0) {
+            setResults(localResults);
+            setSourceMsg(`觀光署 ${localResults.length} 筆`);
+            setSearching(false);
+            return;
+          }
+          try {
+            const osm = await searchNominatim(q);
+            setResults(osm);
+            setSourceMsg(osm.length > 0 ? `OSM 地圖 ${osm.length} 筆` : '');
+            if (osm.length === 0) {
+              setHint('沒有結果。試試:① 改變關鍵字  ② 貼上 Google Maps 連結  ③ 用下方「📍 地圖點選」手動標記');
+            }
+          } catch (e) {
+            console.warn('Nominatim failed', e);
+            setResults([]);
+            setHint('OSM 搜尋失敗:' + (e.message || e));
+          } finally {
+            setSearching(false);
+          }
+        }, 400);
+        return () => clearTimeout(timer);
+      }, [query, twPOIs]);
+
+      const handleAdd = (r) => {
+        onAdd(r);
+        setQuery('');
+        setResults([]);
+        setSourceMsg('');
+      };
+
+      const categoryLabel = {
+        scenic: '景點', restaurant: '餐廳', hotel: '住宿', rest: '休息站', gas: '加油站',
+      };
+
+      return (
+        <div className="space-y-2">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜尋景點/餐廳/地址,或貼 Google Maps 連結"
+            className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+          />
+          <div className="flex items-center gap-2 text-xs flex-wrap">
+            <button
+              onClick={onToggleMapPin}
+              className={`px-2 py-1 rounded border transition ${mapPinMode ? 'bg-blue-500 text-white border-blue-500' : 'bg-white border-slate-300 hover:bg-slate-50'}`}
+            >
+              {mapPinMode ? '取消地圖點選' : '📍 地圖點選'}
+            </button>
+            {poiState?.phase === 'loading' && (
+              <span className="text-slate-500">⏳ 載入觀光署資料 {(poiState.current ?? 0) + 1}/{poiState.total}({poiState.label})...</span>
+            )}
+            {poiState?.phase === 'done' && (
+              <span className="text-emerald-600">✓ 觀光署資料就緒({(poiState.count || 0).toLocaleString()} 筆)</span>
+            )}
+            {poiState?.phase === 'cached' && (
+              <span className="text-slate-500">📦 快取({(poiState.count || 0).toLocaleString()} 筆)</span>
+            )}
+            {poiState?.phase === 'error' && (
+              <span className="text-red-500">⚠️ POI 載入失敗,仍可用 OSM 搜尋</span>
+            )}
+          </div>
+
+          {sourceMsg && <p className="text-xs text-slate-500">{sourceMsg}</p>}
+          {searching && <p className="text-xs text-slate-500">搜尋中...</p>}
+          {hint && <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">{hint}</div>}
+
+          {results.length > 0 && (
+            <div className="space-y-1.5 max-h-[420px] overflow-y-auto">
+              {results.map((r) => (
+                <button
+                  key={r.id || `${r.lat},${r.lon}`}
+                  onClick={() => handleAdd(r)}
+                  className="w-full text-left p-2 bg-white border border-slate-200 rounded-lg hover:bg-blue-50 hover:border-blue-300 transition"
+                >
+                  <div className="font-medium text-slate-800 text-sm leading-tight">{r.name}</div>
+                  {r.address && <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{r.address}</div>}
+                  <div className="flex gap-1 mt-1 flex-wrap">
+                    {r.category && categoryLabel[r.category] && (
+                      <span className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded">{categoryLabel[r.category]}</span>
+                    )}
+                    {r.source === 'tourism_bureau' && (
+                      <span className="text-xs px-1.5 py-0.5 bg-emerald-50 text-emerald-700 rounded">觀光署</span>
+                    )}
+                    {r.source === 'osm' && (
+                      <span className="text-xs px-1.5 py-0.5 bg-sky-50 text-sky-700 rounded">OSM</span>
+                    )}
+                    {r.source === 'gmaps_url' && (
+                      <span className="text-xs px-1.5 py-0.5 bg-amber-50 text-amber-700 rounded">G Maps</span>
+                    )}
+                    {r.opening_hours && (
+                      <span className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-500 rounded truncate max-w-[140px]">⏰ {r.opening_hours}</span>
+                    )}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ================================================================
+    // 行程清單項目
+    // ================================================================
+    function LocationListItem({ location, index, total, onDelete, onMove, onClick, selected }) {
+      const isStart = index === 0;
+      const isEnd = total > 1 && index === total - 1;
+      const color = isStart ? '#10B981' : isEnd ? '#EF4444' : '#3B82F6';
+      const sourceLabel = {
+        tourism_bureau: '觀光署', osm: 'OSM', gmaps_url: 'G Maps', manual_pin: '地圖釘選',
+      }[location.source] || '';
+      return (
+        <div
+          className={`p-2 rounded-lg border transition cursor-pointer ${selected ? 'bg-blue-50 border-blue-300' : 'bg-white border-slate-200 hover:border-slate-300'}`}
+          onClick={onClick}
+        >
+          <div className="flex items-start gap-2">
+            <div
+              className="w-7 h-7 rounded-full flex-shrink-0 text-white text-xs font-bold flex items-center justify-center"
+              style={{ backgroundColor: color }}
+            >
+              {index + 1}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium text-slate-800 truncate">{location.name}</div>
+              {location.address && <div className="text-xs text-slate-500 truncate">{location.address}</div>}
+              {sourceLabel && <div className="text-xs text-slate-400">{sourceLabel}</div>}
+            </div>
+            <div className="flex flex-col gap-0.5 flex-shrink-0">
+              <button onClick={(e) => { e.stopPropagation(); onMove(-1); }} disabled={index === 0} className="text-xs px-1.5 py-0.5 hover:bg-slate-100 rounded disabled:opacity-30">↑</button>
+              <button onClick={(e) => { e.stopPropagation(); onMove(1); }} disabled={index === total - 1} className="text-xs px-1.5 py-0.5 hover:bg-slate-100 rounded disabled:opacity-30">↓</button>
+            </div>
+            <button onClick={(e) => { e.stopPropagation(); onDelete(); }} className="text-sm px-1.5 py-0.5 text-red-500 hover:bg-red-50 rounded flex-shrink-0">×</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
+    // EditorView(Phase 2 — 含搜尋與地圖)
+    // ================================================================
+    function EditorView({ user, tripId, twPOIs, poiState }) {
       const [trip, setTrip] = useState(null);
       const [loading, setLoading] = useState(true);
       const [editingTitle, setEditingTitle] = useState(false);
       const [titleInput, setTitleInput] = useState('');
+      const [mapPinMode, setMapPinMode] = useState(false);
+      const [focusLocationId, setFocusLocationId] = useState(null);
+      const [saveStatus, setSaveStatus] = useState('idle'); // idle | saving | saved | error
+      const saveTimerRef = useRef(null);
 
       useEffect(() => {
         if (!user || !tripId) return;
@@ -705,25 +1195,45 @@
             }
             setLoading(false);
           },
-          (e) => { console.error(e); setLoading(false); }
+          (e) => { console.error('[Editor] snapshot error', e); setLoading(false); }
         );
         return unsub;
       }, [user, tripId]);
 
-      const saveTitle = async () => {
-        if (!titleInput.trim()) return;
+      const dayIndex = 0; // Phase 2 只支援單天;多天 tab 由 Phase 3 加入
+      const locations = trip?.days?.[dayIndex]?.locations || [];
+
+      const updateTrip = async (updates) => {
+        if (!user || !tripId) return;
+        setSaveStatus('saving');
         try {
           await paths.userTrip(user.uid, tripId).update({
-            title: titleInput.trim(),
+            ...updates,
             updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
           });
-          setEditingTitle(false);
+          setSaveStatus('saved');
+          if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+          saveTimerRef.current = setTimeout(() => setSaveStatus('idle'), 1500);
         } catch (e) {
+          console.error('[Editor] update failed', e);
+          setSaveStatus('error');
           alert('儲存失敗:' + (e.message || e));
         }
       };
 
-      const handleDelete = async () => {
+      const saveLocations = (newLocations) => {
+        const days = [...(trip.days || [{ dayNumber: 1, date: '', locations: [] }])];
+        days[dayIndex] = { ...days[dayIndex], locations: newLocations };
+        return updateTrip({ days });
+      };
+
+      const saveTitle = async () => {
+        if (!titleInput.trim()) return;
+        await updateTrip({ title: titleInput.trim() });
+        setEditingTitle(false);
+      };
+
+      const handleDeleteTrip = async () => {
         if (!window.confirm(`確定要刪除「${trip.title}」嗎?此動作無法復原。`)) return;
         try {
           await paths.userTrip(user.uid, tripId).delete();
@@ -733,12 +1243,57 @@
         }
       };
 
+      const handleAddLocation = (result) => {
+        const newLoc = {
+          id: result.id?.startsWith('loc_') ? result.id : generateLocationId(),
+          name: result.name,
+          originalName: result.originalName || result.name,
+          address: result.address || '',
+          lat: result.lat,
+          lon: result.lon,
+          source: result.source || 'osm',
+          category: result.category || 'custom',
+          opening_hours: result.opening_hours || '',
+        };
+        const next = [...locations, newLoc];
+        saveLocations(next);
+        setFocusLocationId(newLoc.id);
+      };
+
+      const handleMapPinClick = async (latlng) => {
+        const { lat, lng } = latlng;
+        const geo = await reverseGeocode(lat, lng);
+        handleAddLocation({
+          name: geo.name,
+          address: geo.address,
+          lat,
+          lon: lng,
+          source: 'manual_pin',
+        });
+        setMapPinMode(false);
+      };
+
+      const handleDeleteLocation = (idx) => {
+        if (!window.confirm(`移除「${locations[idx].name}」?`)) return;
+        const next = locations.filter((_, i) => i !== idx);
+        saveLocations(next);
+      };
+
+      const handleMoveLocation = (idx, delta) => {
+        const newIdx = idx + delta;
+        if (newIdx < 0 || newIdx >= locations.length) return;
+        const next = [...locations];
+        [next[idx], next[newIdx]] = [next[newIdx], next[idx]];
+        saveLocations(next);
+      };
+
       if (loading) return <LoadingScreen message="載入行程..." />;
       if (!trip) return <ErrorScreen title="找不到此行程" message="這個行程可能已被刪除,或網址錯誤" />;
 
       return (
-        <div className="max-w-5xl mx-auto p-4 sm:p-6 space-y-4">
-          <div className="flex items-center gap-2">
+        <div className="max-w-6xl mx-auto p-4 sm:p-6">
+          {/* 標題列 */}
+          <div className="flex items-center gap-2 mb-4">
             <button onClick={() => navigate('#/')} className="p-2 hover:bg-slate-200 rounded-lg">←</button>
             {editingTitle ? (
               <input
@@ -760,31 +1315,67 @@
                 <span className="text-sm text-slate-400 opacity-60 group-hover:opacity-100 transition">✏️</span>
               </h1>
             )}
+            <span className="text-xs text-slate-500 w-20 text-right">
+              {saveStatus === 'saving' && '💾 儲存中'}
+              {saveStatus === 'saved' && '✓ 已儲存'}
+              {saveStatus === 'error' && '⚠️ 失敗'}
+            </span>
           </div>
 
-          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
-            <p className="font-medium mb-1">🚧 Phase 1 階段:Editor 為基本骨架</p>
-            <p>完整編輯功能(搜尋地點、地圖、拖拉排序、多天行程、費用統計)將在 Phase 2 ~ Phase 3 開發。</p>
-            <p className="mt-1 text-xs">目前可改標題、刪除行程,作為 Firestore 寫入測試。</p>
-          </div>
+          <div className="grid grid-cols-1 md:grid-cols-[380px,1fr] gap-4">
+            {/* 左欄 */}
+            <div className="space-y-3">
+              <div className="bg-white rounded-xl border border-slate-200 p-3">
+                <h2 className="text-sm font-semibold text-slate-700 mb-2">🔍 搜尋並加入景點</h2>
+                <SearchPanel
+                  twPOIs={twPOIs}
+                  poiState={poiState}
+                  onAdd={handleAddLocation}
+                  mapPinMode={mapPinMode}
+                  onToggleMapPin={() => setMapPinMode((v) => !v)}
+                />
+              </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 p-4">
-            <div className="text-xs text-slate-500 mb-2">行程資料(供除錯)</div>
-            <pre className="text-xs text-slate-600 overflow-auto whitespace-pre-wrap">{JSON.stringify({
-              id: trip.id,
-              title: trip.title,
-              status: trip.status,
-              startDate: trip.startDate,
-              departureTime: trip.departureTime,
-              dayCount: (trip.days || []).length,
-              locationCount: (trip.days || []).reduce((s, d) => s + (d.locations || []).length, 0),
-              activeMembers: (trip.activeMembers || []).length,
-            }, null, 2)}</pre>
-          </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-3">
+                <h2 className="text-sm font-semibold text-slate-700 mb-2">📋 行程清單({locations.length})</h2>
+                {locations.length === 0 ? (
+                  <p className="text-sm text-slate-500 py-4 text-center">尚未加入景點<br /><span className="text-xs">使用上方搜尋框開始</span></p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {locations.map((loc, idx) => (
+                      <LocationListItem
+                        key={loc.id}
+                        location={loc}
+                        index={idx}
+                        total={locations.length}
+                        selected={focusLocationId === loc.id}
+                        onClick={() => setFocusLocationId(loc.id)}
+                        onMove={(delta) => handleMoveLocation(idx, delta)}
+                        onDelete={() => handleDeleteLocation(idx)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
 
-          <button onClick={handleDelete} className="w-full py-2 bg-red-50 border border-red-200 text-red-600 rounded-lg hover:bg-red-100 text-sm">
-            🗑️ 刪除此行程
-          </button>
+              <button onClick={handleDeleteTrip} className="w-full py-2 bg-red-50 border border-red-200 text-red-600 rounded-lg hover:bg-red-100 text-sm">
+                🗑️ 刪除此行程
+              </button>
+            </div>
+
+            {/* 右欄:地圖 */}
+            <div>
+              <MapView
+                locations={locations}
+                mapPinMode={mapPinMode}
+                onMapClick={handleMapPinClick}
+                focusLocationId={focusLocationId}
+              />
+              <p className="text-xs text-slate-400 text-center mt-2">
+                Phase 2:單天 + 基本搜尋 / Phase 3 加入多天、拖拉、預約時間、必去標籤等
+              </p>
+            </div>
+          </div>
         </div>
       );
     }
@@ -874,6 +1465,10 @@
       const [googleBusy, setGoogleBusy] = useState(false);
       const [appError, setAppError] = useState(firebaseInitError);
 
+      // Phase 2:觀光署 POI
+      const [twPOIs, setTwPOIs] = useState([]);
+      const [poiState, setPoiState] = useState(null);
+
       const isViewer = !!familyCodeUrl;
 
       // === Hash 路由監聽 ===
@@ -882,6 +1477,24 @@
         window.addEventListener('hashchange', handler);
         return () => window.removeEventListener('hashchange', handler);
       }, []);
+
+      // === Phase 2:背景載入觀光署 POI(僅規劃者需要)===
+      useEffect(() => {
+        if (isViewer) return;
+        let cancelled = false;
+        loadTwPOIs({ onProgress: (s) => { if (!cancelled) setPoiState(s); } })
+          .then((items) => {
+            if (cancelled) return;
+            setTwPOIs(items);
+            setPoiState((prev) => prev?.phase === 'cached' ? prev : { phase: 'done', count: items.length });
+          })
+          .catch((e) => {
+            if (cancelled) return;
+            console.error('[POI] load failed', e);
+            setPoiState({ phase: 'error', message: e.message || String(e) });
+          });
+        return () => { cancelled = true; };
+      }, [isViewer]);
 
       // === Auth state listener(規劃者 Google + 觀看者匿名)===
       useEffect(() => {
@@ -1098,7 +1711,7 @@
 
       switch (route.view) {
         case 'family_list': return <FamilyListPage user={user} profile={profile} />;
-        case 'editor': return <EditorView user={user} tripId={route.tripId} />;
+        case 'editor': return <EditorView user={user} tripId={route.tripId} twPOIs={twPOIs} poiState={poiState} />;
         case 'mobile_view': return <MobileTripView user={user} tripId={route.tripId} isViewer={false} />;
         case 'settings': return <SettingsPage user={user} profile={profile} />;
         default: return <Dashboard user={user} profile={profile} />;
