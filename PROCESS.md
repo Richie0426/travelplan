@@ -718,6 +718,74 @@ window.appId = "travel-plan-personal";
 
 ---
 
+## Phase 9 — 上線後改版
+
+### 目標
+記錄上線後實際使用發現的 UX 問題與優化項目，依優先度排程處理。
+**本階段為持續累積，每完成一項就在驗收條件打勾並標日期。**
+
+### 9.1 LINE 內建瀏覽器偵測與引導
+
+**問題情境**（2026-05-17 上線測試後發現）
+- 將分享連結 `?family={code}` 貼到 LINE 群組給家人
+- 家人在 LINE 點連結 → 預設用 LINE 內建瀏覽器（LIFF browser）開啟
+- LINE 內建瀏覽器**不支援 PWA 安裝**（沒有「加到主畫面」橫幅）
+- 也不支援 Service Worker、Google OAuth 不穩定
+- 結果家人能看到行程，但無法享受 APP 體驗（違背專案核心訴求）
+
+**目前的暫時解法**
+- 用 QR Code 分享（家人掃碼直接開 Chrome，繞過 LINE 瀏覽器）
+- 或請家人手動點 LINE 瀏覽器右上 ⋮ → 「在外部瀏覽器開啟」
+
+**本任務要做的事**
+
+1. **偵測 LINE 內建瀏覽器**
+   - 用 `navigator.userAgent` 判斷字串包含 `Line/`
+   - 同步檢測其他常見 in-app browsers（FB Messenger、Instagram、WeChat 等）
+   - 提供統一的 `isInAppBrowser()` helper function
+
+2. **顯示醒目橫幅**
+   - 偵測到 in-app browser 時，頁面頂部出現紅色 / 黃色橫幅：
+     ```
+     ⚠️ 您正在 LINE 內開啟，無法安裝為 APP
+     [👉 在外部瀏覽器開啟] 按鈕（教學動畫或圖示）
+     ```
+   - 橫幅持續顯示（不可關閉），直到使用者切換到外部瀏覽器
+   - Android：點按鈕嘗試呼叫 `intent://...#Intent;...end;` 強制跳 Chrome
+   - iOS：顯示靜態圖示教學「點右上 ⋯ → Safari 開啟」
+
+3. **隱藏無效的 PWA 安裝按鈕**
+   - 偵測到 in-app browser 時，Dashboard 上方「加到主畫面」橫幅自動隱藏
+   - 避免使用者點了沒反應而困惑
+
+4. **複製連結快速操作**
+   - 橫幅內提供「📋 複製此網址」按鈕
+   - 家人可貼到 Chrome 網址列開啟
+
+5. **使用者教育文案**
+   - 在 Dashboard「家庭分享連結」區塊加說明文字：
+     ```
+     💡 提示：若家人用 LINE 點連結，請告知他們點右上 ⋮ 
+     →「在外部瀏覽器開啟」才能完整使用 APP 體驗
+     ```
+   - 提供「📋 複製含教學文字的訊息」一鍵複製按鈕（連結 + 教學步驟組合）
+
+**實作位置**
+- `index.html` 加 `isInAppBrowser()` helper（放在 utils 區塊）
+- 全域 React state `inAppBrowser`，在 App 元件 mount 時偵測
+- 條件渲染 `<InAppBrowserBanner />` 元件（觀看者模式與規劃者模式都顯示）
+- Dashboard 元件加分享連結說明文字 + 一鍵複製教學訊息
+
+### 驗收條件
+- [ ] 在 LINE 內建瀏覽器開啟測試網址 → 看到紅色橫幅警示
+- [ ] 「在外部瀏覽器開啟」按鈕在 Android 能成功跳 Chrome
+- [ ] iOS 版本顯示對應教學圖示（無法自動跳轉但有引導）
+- [ ] FB Messenger、Instagram 內建瀏覽器也能偵測（測試 user-agent）
+- [ ] 正常 Chrome / Safari 開啟不顯示橫幅
+- [ ] Dashboard 顯示複製含教學文字的訊息按鈕
+
+---
+
 ## 測試策略
 
 ### 手動測試

@@ -2,7 +2,7 @@
 // 智慧旅遊規劃書 — Service Worker
 // 變更版本號會強制觸發 SW 更新並清掉舊快取
 // =====================================================================
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const CACHE_PREFIX = 'tw-travel';
 const CORE_CACHE = `${CACHE_PREFIX}-core-${VERSION}`;
 const TILE_CACHE = `${CACHE_PREFIX}-tiles-${VERSION}`;

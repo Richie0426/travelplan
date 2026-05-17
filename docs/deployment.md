@@ -61,7 +61,7 @@ git branch -M main
 
 # 設定您的身份（如果第一次用）
 git config user.name "Richie Yang"
-git config user.email "richie.yang@ycmcnc.com"
+git config user.email "roach0426@gmail.com"
 
 # 加檔案 + 第一次 commit
 git add .
@@ -69,7 +69,7 @@ git status   # 確認沒有奇怪的檔案被加進來
 git commit -m "Initial commit: phases 0-7 完成"
 
 # 連線到剛建立的 GitHub repo
-git remote add origin https://github.com/{您的-username}/{repo-name}.git
+git remote add origin https://github.com/Richie0426/travelplan.git
 git push -u origin main
 ```
 

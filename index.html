@@ -1760,7 +1760,9 @@ ${HTML_END}`;
             startDate: '',
             departureTime: '09:00',
             notes: '',
-            activeMembers: [],
+            // activeMembers 預設 null = 「全員預設參與」(任何 known_family 成員都算 in)
+            // 規劃者首次在 ParticipantsPanel 取消勾選時才會變成明確陣列
+            activeMembers: null,
             days: [{ dayNumber: 1, date: '', locations: [] }],
             expenses: [],
           });
@@ -1846,7 +1848,7 @@ ${HTML_END}`;
     // ================================================================
     // 家人名單頁
     // ================================================================
-    function FamilyMemberRow({ user, member, isDuplicate }) {
+    function FamilyMemberRow({ user, profile, member, isDuplicate }) {
       const [editing, setEditing] = useState(false);
       const [nameInput, setNameInput] = useState(member.nickname || '');
       const [busy, setBusy] = useState(false);
@@ -1885,6 +1887,18 @@ ${HTML_END}`;
         setBusy(true);
         try {
           await paths.knownFamilyMember(user.uid, member.id).delete();
+          // 同步清掉目前 active 行程裡這位家人的位置資訊(避免地圖殘留)
+          if (profile?.familyShareCode) {
+            try {
+              const famSnap = await paths.sharedFamily(profile.familyShareCode).get();
+              const activeTripId = famSnap.exists ? famSnap.data().activeTripId : null;
+              if (activeTripId) {
+                await paths.participant(activeTripId, member.id).delete();
+              }
+            } catch (e) {
+              console.warn('[FamilyRemove] participant cleanup failed', e);
+            }
+          }
         } catch (e) {
           alert('移除失敗:' + (e.message || e));
           setBusy(false);
@@ -2013,6 +2027,7 @@ ${HTML_END}`;
                     <FamilyMemberRow
                       key={m.id}
                       user={user}
+                      profile={profile}
                       member={m}
                       isDuplicate={isDup}
                     />
@@ -2795,6 +2810,15 @@ ${HTML_END}`;
                     <p className="text-xs text-slate-400">
                       💡 預設全部參與。取消勾選任何一位,系統會記住本次行程的明確參與名單。
                     </p>
+                  )}
+                  {Array.isArray(activeMembers) && activeMembers.length === 0 && members.length > 0 && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800 space-y-2">
+                      <p>⚠️ 目前沒有家人在本次參與名單中,家人開連結會看到「您不在參與名單」提示。</p>
+                      <button
+                        onClick={() => onUpdate({ activeMembers: null })}
+                        className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded text-xs font-medium"
+                      >👨‍👩‍👧 一鍵全部加入</button>
+                    </div>
                   )}
                   <div className="pt-2 border-t border-slate-100">
                     <p className="text-xs text-slate-500 mb-2">邀請更多家人:</p>
@@ -4170,9 +4194,6 @@ ${HTML_END}`;
                 onMapClick={handleMapPinClick}
                 focusLocationId={focusLocationId}
               />
-              <p className="text-xs text-slate-400 text-center mt-2">
-                Phase 7 已完成 / 下一步 Phase 8:部署到 GitHub Pages
-              </p>
             </div>
           </div>
         </div>
@@ -4357,7 +4378,7 @@ ${HTML_END}`;
     // ================================================================
     // Mobile Trip View(規劃者 + 家人觀看者共用入口)
     // ================================================================
-    function MobileTripView({ user, profile, tripId, ownerName, viewerProfile, sharedTripData, isViewer, twPOIs, poiState }) {
+    function MobileTripView({ user, profile, tripId, ownerName, viewerProfile, sharedTripData, isViewer, twPOIs, poiState, familyOwner, familyCodeUrl, setViewerProfile }) {
       const [trip, setTrip] = useState(null);
       const [loading, setLoading] = useState(true);
 
@@ -4376,7 +4397,15 @@ ${HTML_END}`;
       }, [isViewer, user, tripId]);
 
       if (isViewer) {
-        return <ViewerMobileView user={user} ownerName={ownerName} viewerProfile={viewerProfile} sharedTripData={sharedTripData} />;
+        return <ViewerMobileView
+          user={user}
+          ownerName={ownerName}
+          viewerProfile={viewerProfile}
+          sharedTripData={sharedTripData}
+          familyOwner={familyOwner}
+          familyCodeUrl={familyCodeUrl}
+          setViewerProfile={setViewerProfile}
+        />;
       }
       if (loading) return <LoadingScreen message="載入行程..." />;
       if (!trip) return <ErrorScreen title="找不到此行程" message="這個行程可能已被刪除,或網址錯誤" />;
@@ -4384,13 +4413,162 @@ ${HTML_END}`;
     }
 
     // ================================================================
+    // ViewerSettingsModal(觀看者:改自己稱呼/圖示/顏色/分享位置,或重新註冊)
+    // ================================================================
+    function ViewerSettingsModal({ user, viewerProfile, familyOwner, familyCodeUrl, activeTripId, onProfileUpdate, onClose }) {
+      const [nickname, setNickname] = useState(viewerProfile?.nickname || '');
+      const [icon, setIcon] = useState(viewerProfile?.icon || ICON_OPTIONS[0]);
+      const [color, setColor] = useState(viewerProfile?.color || COLOR_OPTIONS[0].value);
+      const [shareLocation, setShareLocation] = useState(viewerProfile?.shareLocation ?? true);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(null);
+
+      const save = async () => {
+        if (!nickname.trim()) { setError('請輸入稱呼'); return; }
+        setBusy(true); setError(null);
+        try {
+          const profileObj = { nickname: nickname.trim(), icon, color, shareLocation };
+          // 1. localStorage(裝置記住)
+          lsSet(LS_VIEWER_PROFILE_PREFIX + familyCodeUrl, JSON.stringify(profileObj));
+          // 2. participants(目前 active 行程的即時資訊)
+          if (activeTripId && user?.uid) {
+            try {
+              await paths.participant(activeTripId, user.uid).set({
+                ...profileObj,
+                lastUpdate: firebase.firestore.FieldValue.serverTimestamp(),
+              }, { merge: true });
+            } catch (e) { console.warn('[ViewerSettings] participant update failed', e); }
+          }
+          // 3. known_family(規劃者名冊;依規則可能失敗,失敗不影響)
+          if (familyOwner?.ownerUid && user?.uid) {
+            try {
+              await paths.knownFamilyMember(familyOwner.ownerUid, user.uid).update({
+                nickname: profileObj.nickname,
+                icon: profileObj.icon,
+                color: profileObj.color,
+                shareLocation: profileObj.shareLocation,
+                lastSeenAt: firebase.firestore.FieldValue.serverTimestamp(),
+              });
+            } catch (e) { console.warn('[ViewerSettings] known_family update failed', e); }
+          }
+          if (onProfileUpdate) onProfileUpdate(profileObj);
+          onClose();
+        } catch (e) {
+          setError('儲存失敗:' + (e.message || e));
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const handleReset = () => {
+        if (!window.confirm('要重新註冊嗎?\n\n會清除此裝置上的稱呼設定,重新整理後跳回首次設定畫面。\n您在其他裝置上的設定不受影響。')) return;
+        try { localStorage.removeItem(LS_VIEWER_PROFILE_PREFIX + familyCodeUrl); } catch (_) {}
+        window.location.reload();
+      };
+
+      return (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
+          <div className="bg-white rounded-2xl shadow-xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-xl font-bold text-slate-800">我的設定</h3>
+              <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-2xl leading-none">×</button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">稱呼 <span className="text-red-500">*</span></label>
+                <input
+                  type="text"
+                  value={nickname}
+                  onChange={(e) => setNickname(e.target.value)}
+                  placeholder="例如:媽媽、阿姨、舅舅..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  maxLength={20}
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">圖示</label>
+                <div className="grid grid-cols-8 gap-2">
+                  {ICON_OPTIONS.map((ic) => (
+                    <button
+                      key={ic}
+                      type="button"
+                      onClick={() => setIcon(ic)}
+                      className={`text-2xl py-2 rounded-lg border-2 transition ${icon === ic ? 'border-blue-500 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}
+                    >{ic}</button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">顏色</label>
+                <div className="grid grid-cols-6 gap-2">
+                  {COLOR_OPTIONS.map((c) => (
+                    <button
+                      key={c.value}
+                      type="button"
+                      onClick={() => setColor(c.value)}
+                      className={`h-10 rounded-lg border-4 transition ${color === c.value ? 'border-slate-700' : 'border-transparent'}`}
+                      style={{ backgroundColor: c.value }}
+                      title={c.name}
+                    ></button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
+                <div>
+                  <div className="text-sm font-medium text-slate-700">分享我的位置</div>
+                  <div className="text-xs text-slate-500">讓家人在地圖上看到您</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShareLocation(!shareLocation)}
+                  className={`relative w-12 h-6 rounded-full transition ${shareLocation ? 'bg-blue-500' : 'bg-slate-300'}`}
+                >
+                  <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition-all ${shareLocation ? 'left-6' : 'left-0.5'}`}></span>
+                </button>
+              </div>
+            </div>
+
+            {error && (
+              <div className="mt-3 px-3 py-2 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700">{error}</div>
+            )}
+
+            <div className="flex gap-2 mt-5">
+              <button
+                onClick={onClose}
+                className="flex-1 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium"
+              >取消</button>
+              <button
+                onClick={save}
+                disabled={busy || !nickname.trim()}
+                className="flex-1 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-300 text-white rounded-lg font-medium"
+              >{busy ? '儲存中...' : '✓ 儲存'}</button>
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-slate-200">
+              <button
+                onClick={handleReset}
+                className="w-full py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-lg text-sm"
+              >🔄 重新註冊(清除此裝置設定)</button>
+              <p className="text-xs text-slate-400 mt-1.5 text-center">用於名字輸入錯誤、想換稱呼之類的情況</p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ================================================================
     // ViewerMobileView(家人觀看者視角 — Phase 5 完整版)
     // ================================================================
-    function ViewerMobileView({ user, ownerName, viewerProfile, sharedTripData }) {
+    function ViewerMobileView({ user, ownerName, viewerProfile, sharedTripData, familyOwner, familyCodeUrl, setViewerProfile }) {
       const trip = sharedTripData;
       const days = trip?.days || [];
       const [dayIndex, setDayIndex] = useState(trip?.currentStatus?.currentDayIndex ?? 0);
       const [showNotes, setShowNotes] = useState(false);
+      const [showSettings, setShowSettings] = useState(false);
 
       useEffect(() => {
         if (dayIndex >= days.length && days.length > 0) setDayIndex(Math.max(0, days.length - 1));
@@ -4461,14 +4639,26 @@ ${HTML_END}`;
           <div className="max-w-md mx-auto p-4 space-y-4 min-h-screen">
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-bold text-slate-800 flex-1">{ownerName ? `${ownerName}'s Family` : '📱 旅程模式'}</h1>
+              {viewerProfile && (
+                <button
+                  onClick={() => setShowSettings(true)}
+                  className="w-9 h-9 rounded-full bg-slate-100 hover:bg-slate-200 flex items-center justify-center text-lg flex-shrink-0"
+                  title="我的設定"
+                >⚙️</button>
+              )}
             </div>
             {viewerProfile && (
-              <div className="bg-white rounded-xl border border-slate-200 p-4 flex items-center gap-3">
+              <div
+                className="bg-white rounded-xl border border-slate-200 p-4 flex items-center gap-3 cursor-pointer hover:bg-slate-50"
+                onClick={() => setShowSettings(true)}
+                title="點此修改"
+              >
                 <div className="w-12 h-12 rounded-full flex items-center justify-center text-2xl" style={{ backgroundColor: viewerProfile.color }}>{viewerProfile.icon}</div>
-                <div>
+                <div className="flex-1">
                   <div className="font-semibold text-slate-800">{viewerProfile.nickname}</div>
                   <div className="text-xs text-slate-500">位置分享:{viewerProfile.shareLocation ? '開啟' : '關閉'}</div>
                 </div>
+                <span className="text-slate-400 text-sm">✏️</span>
               </div>
             )}
             <div className="bg-white rounded-xl border border-slate-200 p-6 text-center text-slate-500">
@@ -4476,6 +4666,18 @@ ${HTML_END}`;
               <p>目前沒有進行中的行程</p>
               <p className="text-xs mt-2">當規劃者啟動行程時會自動顯示在這</p>
             </div>
+
+            {showSettings && (
+              <ViewerSettingsModal
+                user={user}
+                viewerProfile={viewerProfile}
+                familyOwner={familyOwner}
+                familyCodeUrl={familyCodeUrl}
+                activeTripId={trip?.tripRef || familyOwner?.activeTripId || null}
+                onProfileUpdate={setViewerProfile}
+                onClose={() => setShowSettings(false)}
+              />
+            )}
           </div>
         );
       }
@@ -4487,13 +4689,14 @@ ${HTML_END}`;
           <div className="flex items-center gap-2">
             <h1 className="text-base font-bold text-slate-800 flex-1 truncate">{ownerName ? `${ownerName} · ${trip.title || '行程'}` : trip.title}</h1>
             {viewerProfile && (
-              <span
-                className="w-8 h-8 rounded-full flex items-center justify-center text-base flex-shrink-0"
+              <button
+                onClick={() => setShowSettings(true)}
+                className="w-9 h-9 rounded-full flex items-center justify-center text-base flex-shrink-0 hover:ring-2 hover:ring-slate-300"
                 style={{ backgroundColor: viewerProfile.color }}
-                title={viewerProfile.nickname}
+                title={`${viewerProfile.nickname} — 點此修改`}
               >
                 {viewerProfile.icon}
-              </span>
+              </button>
             )}
           </div>
 
@@ -4632,6 +4835,19 @@ ${HTML_END}`;
             >
               📷 {trip.sharedAlbumLabel || '上傳照片到共享相簿'}
             </a>
+          )}
+
+          {/* 我的設定 Modal */}
+          {showSettings && (
+            <ViewerSettingsModal
+              user={user}
+              viewerProfile={viewerProfile}
+              familyOwner={familyOwner}
+              familyCodeUrl={familyCodeUrl}
+              activeTripId={trip?.tripRef || familyOwner?.activeTripId || null}
+              onProfileUpdate={setViewerProfile}
+              onClose={() => setShowSettings(false)}
+            />
           )}
         </div>
       );
@@ -5671,6 +5887,9 @@ ${HTML_END}`;
             viewerProfile={viewerProfile}
             sharedTripData={sharedTripData}
             isViewer={true}
+            familyOwner={familyOwner}
+            familyCodeUrl={familyCodeUrl}
+            setViewerProfile={setViewerProfile}
           />
         );
       }
