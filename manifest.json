@@ -1,7 +1,7 @@
 {
   "name": "智慧旅遊規劃書",
   "short_name": "旅遊計畫",
-  "description": "家庭旅遊規劃與導航工具",
+  "description": "家庭旅遊規劃與導航工具(規劃、即時同步、多人位置)",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
@@ -9,5 +9,8 @@
   "background_color": "#f8fafc",
   "theme_color": "#3b82f6",
   "lang": "zh-Hant",
-  "icons": []
+  "icons": [
+    { "src": "icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
 }

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"C:\\\\Users\\\\ROACH\\\\.claude\\\\projects\\\\d--vscode-travelplan------\\\\memory\\\\\" 2>&1 | Select-Object -First 30)",
+      "Bash(node -e \"const fs = require\\('fs'\\); const html = fs.readFileSync\\('index.html','utf8'\\); const script = html.match\\(/<script type=\\\\\"text\\\\\\\\/babel\\\\\">\\([\\\\\\\\s\\\\\\\\S]*?\\)<\\\\\\\\/script>/\\)[1]; const Babel = require\\('@babel/standalone'\\); try { Babel.transform\\(script, { presets: ['react'] }\\); console.log\\('OK'\\); } catch\\(e\\) { console.log\\('ERR:', e.message\\); }\")"
+    ]
+  }
+}

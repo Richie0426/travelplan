@@ -13,4 +13,4 @@ window.appId = "travel-plan-personal";
 
 // (Phase 7 用)中央氣象署 API Key,可現在留空,之後申請後填入
 // 申請網址:https://opendata.cwa.gov.tw
-window.cwaApiKey = "";
+window.cwaApiKey = "CWA-1918544C-491A-440C-A927-D73C23063957";
