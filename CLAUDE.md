@@ -432,7 +432,6 @@ APP 開啟
   │
   ├─📍 Dashboard（首頁）            ← 規劃者進入第一個畫面
   │   ├─ 家庭分享連結（永久顯示）
-  │   ├─ 天氣預報（今日 / 即將出發行程）
   │   ├─ 行程列表（進行中 / 即將前往 / 歷史）
   │   └─ 入口：👨‍👩‍👧 家人名單 / ⚙️ 設定
   │
@@ -463,8 +462,6 @@ APP 開啟
 │ https://richie.github.io/travel/    │
 │   ?family=RICHIE2026                │
 │ [📋 複製] [📱 QR] [💬 LINE 分享]    │
-├──────────────────────────────────────┤
-│ ☀️ 今日天氣：南投 22-28°C 晴時多雲   │
 ├──────────────────────────────────────┤
 │              [ + 建立新計畫 ]         │
 ├──────────────────────────────────────┤
@@ -793,16 +790,16 @@ APP 開啟
 - 跳過「必去」站時跳出確認對話框（避免誤跳）
 - 沿途推薦景點若加入時可標為「可選」（允許旅程中彈性跳過）
 
-### 天氣預報（Dashboard）⭐
-- 資料來源：中央氣象署開放資料平台 https://opendata.cwa.gov.tw
-- 需註冊取得 API Key（免費）
-- API Key 存於 `config.js`：`window.cwaApiKey`
-- Dashboard 顯示行程「日期當天」天氣：
-  - 氣溫高低、天氣狀況（晴/陰/雨）
-  - 降雨機率（PoP）
-  - 圖示（☀️🌤️⛅🌧️）
-- 行程日期 > 7 天則顯示「氣象資料尚未發布」
-- 失敗時不顯示天氣區塊（不影響主功能）
+### ~~天氣預報（Dashboard）~~ ❌ 已移除（2026-09-25）
+
+曾以中央氣象署 F-C0032-001 實作，2026-09-25 整塊移除。
+
+**移除理由**：出發前本來就會自己查天氣，放在規劃書裡沒有實際價值；
+而金鑰必須跟著前端送到瀏覽器，等於長期公開一把憑證來換一個沒人用的功能，
+不划算。移除後 `config.js` 不再有 `window.cwaApiKey`。
+
+⚠️ 舊的 CWA 金鑰曾 commit 進這個公開 repo，**已在 CWA 後台作廢**。
+git 歷史裡的那串已經是廢字串。
 
 ### 行程總備註欄 ⭐
 - Trip.notes 一個自由文字欄位
@@ -997,5 +994,91 @@ plan.html 不適合直接修改的原因：
 
 ---
 
-**最後更新**：2026-05-16  
+## 16. 機敏資訊處理與 GitHub 上傳守則 ⚠️
+
+> **本章優先級最高。任何 commit 前都要先確認本章規則。**
+
+### 16.1 這個 repo 是「公開」的
+
+- Remote：`https://github.com/Richie0426/travelplan.git`
+- 部署：GitHub Pages（`https://richie0426.github.io/travelplan/`）
+- **GitHub Pages 免費方案必須使用 public repo**，所以這個 repo 無法改成私有而仍保有家庭分享連結。
+
+因此：**任何進入 Git 的內容 = 對全世界公開**。
+而且 Git 會保留歷史，事後刪檔並不會讓金鑰消失，必須改寫歷史（`filter-repo` / BFG）並強制推送才清得掉——遠比一開始就不要 commit 麻煩太多。
+
+### 16.2 分級：什麼算機敏、什麼不算
+
+| 等級 | 項目 | 可否進 Git | 說明 |
+|------|------|-----------|------|
+| 🔴 高 | LINE Channel Access Token / Channel Secret | ❌ 絕對不可 | 等同官方帳號密碼，可冒名發訊息、吃光免費額度 |
+| 🔴 高 | Google 服務帳號金鑰 JSON（`service-account*.json`） | ❌ 絕對不可 | 可直接讀寫 Firestore / Drive，等同後門 |
+| 🔴 高 | Google OAuth Client Secret、refresh token | ❌ 絕對不可 | 可存取本人 Google 帳號資料 |
+| 🟡 低 | Google Drive 資料夾 ID、Sheet ID | ⚠️ 建議不要 | 不是密碼，但會洩漏檔案位置 |
+| 🟢 無 | `config.js` 的 Firebase Web API Key | ✅ 可以 | **設計上就是公開的**，安全靠 Firestore Rules 保證，不 commit 反而部署會壞 |
+| 🟢 無 | 家庭分享碼（`familyShareCode`） | ✅ 可以 | 本來就是要發給家人的；真要作廢用設定頁的「重設分享碼」 |
+
+**常見誤解：** 「Firebase 金鑰在 index.html 裡看得到，那不是很危險？」
+不危險。Firebase Web API Key 只是專案識別碼，不是授權憑證。真正的防線是 Firestore 安全規則（見第 6 章）。
+**但 LINE Token 與服務帳號金鑰完全不同，那些是真的密碼。**
+
+### 16.3 金鑰要放哪裡
+
+| 情境 | 作法 |
+|------|------|
+| 本機留存備忘 | 寫進 `SECRETS.local.md`（已被 `.gitignore` 排除） |
+| Google Apps Script 程式中使用 | 用 `PropertiesService.getScriptProperties().getProperty('LINE_TOKEN')`，**絕不硬編碼在 `.gs` 裡** |
+| Cloudflare Workers | 用 `wrangler secret put`，不要寫在 `wrangler.toml` |
+| 前端網頁（index.html） | 只放 Firebase Web Config，其餘一律不放——前端沒有任何藏東西的能力 |
+
+### 16.4 .gitignore 已涵蓋的保護規則
+
+```
+*.local.md            # 含 SECRETS.local.md、NOTES.local.md
+SECRETS.local.md
+prog/ 、 gas/          # LINE BOT / Apps Script 程式碼與金鑰
+service-account*.json
+*-serviceaccount.json
+*credentials*.json
+.env 、 .env.*
+*.pem 、 *.key 、 secrets/
+```
+
+新增任何含金鑰的檔案時，**先把規則加進 `.gitignore`，再建立檔案**（順序相反的話，檔案可能已被 `git add` 追蹤）。
+
+### 16.5 commit 前的固定檢查
+
+```bash
+# 1. 看清楚這次到底要送什麼上去
+git status
+git diff --cached
+
+# 2. 掃一次常見金鑰特徵（有輸出就停下來檢查）
+git diff --cached | grep -iE "token|secret|password|api[_-]?key|BEGIN.*PRIVATE KEY"
+
+# 3. 確認機敏檔案確實被忽略
+git check-ignore -v SECRETS.local.md
+```
+
+**永遠不要用 `git add .` 當作習慣動作**，尤其是在新增了未知檔案之後。改用 `git add <明確檔名>`。
+
+### 16.6 萬一金鑰已經推上去了
+
+1. **先輪替（最重要）**：LINE Console 重新簽發 token / Google Cloud 刪除並重建服務帳號金鑰。**舊金鑰作廢後，外流的那份就變廢紙**，這一步比清歷史更關鍵、也更即時。
+2. 再清歷史：`git filter-repo` 移除該檔案 → `git push --force`。
+3. 注意：GitHub 上的 fork、cache、以及第三方爬蟲可能已經抓走，所以第 1 步才是真正的解法。
+
+### 16.7 LINE BOT 專案的位置約定
+
+家庭 LINE BOT（Google Apps Script）**不放在本 repo 內**，理由：
+- 部署目標不同（GAS 線上專案 vs GitHub Pages 靜態站）
+- 生命週期不同
+- 本 repo 為公開，GAS 程式必然帶有金鑰
+
+建議位置：`D:/vscode/linebot-gas/`（獨立資料夾，需要版控就在該處 `git init` 且**不加 remote**）。
+程式碼的唯一真實來源是 Google Apps Script 線上專案本身。
+
+---
+
+**最後更新**：2026-09-20  
 **規格決策來源**：與 Richie 在 Cowork mode 的需求討論

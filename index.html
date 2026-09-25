@@ -1200,106 +1200,6 @@
 ${HTML_END}`;
     }
 
-    // ================================================================
-    // Phase 7.4:中央氣象署 36 小時天氣預報(F-C0032-001)
-    // 申請 API key:https://opendata.cwa.gov.tw
-    // 註:F-C0032-001 實際只涵蓋未來 ~36 小時(三個時段),所以只在「明後天」內查
-    // ================================================================
-    const TW_COUNTY_REGEX = /(臺北市|台北市|新北市|桃園市|臺中市|台中市|臺南市|台南市|高雄市|基隆市|新竹縣|新竹市|苗栗縣|彰化縣|南投縣|雲林縣|嘉義縣|嘉義市|屏東縣|宜蘭縣|花蓮縣|臺東縣|台東縣|澎湖縣|金門縣|連江縣)/;
-    function parseCountyFromAddress(addr) {
-      if (!addr) return null;
-      const m = addr.match(TW_COUNTY_REGEX);
-      if (!m) return null;
-      // CWA API 使用「臺」字
-      return m[1].replace(/^台/, '臺');
-    }
-
-    // 暴露給 console 方便除錯
-    if (typeof window !== 'undefined') {
-      window._debug = window._debug || {};
-      window._debug.parseCountyFromAddress = parseCountyFromAddress;
-    }
-
-    function wxEmoji(wx) {
-      if (!wx) return '🌡️';
-      if (wx.includes('雷')) return '⛈️';
-      if (wx.includes('雪')) return '❄️';
-      if (wx.includes('雨')) return '🌧️';
-      if (wx.includes('陰')) return '☁️';
-      if (wx.includes('多雲')) return '⛅';
-      if (wx.includes('晴')) return '☀️';
-      return '🌡️';
-    }
-
-    const _cwaCache = new Map(); // "county|date" → weather obj
-    async function fetchCwaWeather(county, dateStr) {
-      if (!window.cwaApiKey || !county || !dateStr) return null;
-      const cacheKey = `${county}|${dateStr}`;
-      if (_cwaCache.has(cacheKey)) return _cwaCache.get(cacheKey);
-      try {
-        const url = `https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001?Authorization=${encodeURIComponent(window.cwaApiKey)}&locationName=${encodeURIComponent(county)}&format=JSON`;
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`CWA HTTP ${resp.status}`);
-        const data = await resp.json();
-        const loc = data.records?.location?.[0];
-        if (!loc) return null;
-        const elements = {};
-        (loc.weatherElement || []).forEach((e) => { elements[e.elementName] = e.time; });
-        // 找包含 dateStr 中午的時段
-        const target = new Date(dateStr + 'T12:00:00').getTime();
-        const wxTimes = elements.Wx || [];
-        const period = wxTimes.find((t) => {
-          const s = new Date(t.startTime).getTime();
-          const e = new Date(t.endTime).getTime();
-          return s <= target && target <= e;
-        });
-        if (!period) return null;
-        const valueFor = (name) => {
-          const t = (elements[name] || []).find((x) => x.startTime === period.startTime);
-          return t?.parameter?.parameterName || null;
-        };
-        const result = {
-          wx: valueFor('Wx'),
-          pop: valueFor('PoP'),
-          minT: valueFor('MinT'),
-          maxT: valueFor('MaxT'),
-          ci: valueFor('CI'),
-          county,
-        };
-        _cwaCache.set(cacheKey, result);
-        return result;
-      } catch (e) {
-        console.warn('[CWA] fetch failed', e);
-        return null;
-      }
-    }
-
-    if (typeof window !== 'undefined') {
-      window._debug = window._debug || {};
-      window._debug.fetchCwaWeather = fetchCwaWeather;
-    }
-
-    function WeatherChip({ county, dateStr, compact = false }) {
-      const [weather, setWeather] = useState(null);
-      useEffect(() => {
-        if (!window.cwaApiKey || !county || !dateStr) return;
-        const d = new Date(dateStr + 'T00:00:00');
-        const daysAhead = (d - new Date()) / (1000 * 60 * 60 * 24);
-        if (daysAhead < -1 || daysAhead > 2) return; // F-C0032-001 只涵蓋未來 ~36 小時
-        let cancelled = false;
-        fetchCwaWeather(county, dateStr).then((w) => { if (!cancelled) setWeather(w); });
-        return () => { cancelled = true; };
-      }, [county, dateStr]);
-      if (!weather) return null;
-      return (
-        <div className={`flex items-center gap-1 ${compact ? 'text-xs' : 'text-sm'} text-slate-600`}>
-          <span>{wxEmoji(weather.wx)}</span>
-          <span>{weather.county} {weather.minT}–{weather.maxT}°C</span>
-          {weather.pop && <span className="text-blue-600">· 降雨 {weather.pop}%</span>}
-          <span className="text-slate-400 truncate">· {weather.wx}</span>
-        </div>
-      );
-    }
 
     // ================================================================
     // Phase 6:PWA 安裝提示 + SW 更新提示
@@ -1682,19 +1582,6 @@ ${HTML_END}`;
           <div className="text-sm text-slate-600 mb-3">
             {locCount === 0 ? '尚未加入地點' : `已規劃 ${locCount} 個地點`}
           </div>
-          {(() => {
-            // 顯示行程當日天氣:優先用 Day 1 第 1 站(目的地),沒有再退回 origin(住家)
-            if (!trip.startDate) return null;
-            const firstLoc = trip.days?.[0]?.locations?.[0];
-            const addr = firstLoc?.address || trip.origin?.address || '';
-            const county = parseCountyFromAddress(addr);
-            if (!county) return null;
-            return (
-              <div className="mb-3">
-                <WeatherChip county={county} dateStr={trip.startDate} compact />
-              </div>
-            );
-          })()}
           <div className="flex gap-2 flex-wrap">
             <button onClick={() => navigate(`#/edit/${trip.id}`)} className="text-sm px-3 py-1.5 bg-slate-100 rounded-lg hover:bg-slate-200">
               ✏️ 編輯
@@ -2919,11 +2806,6 @@ ${HTML_END}`;
 
     function TripSettingsPanel({ trip, profile, onUpdate }) {
       const [expanded, setExpanded] = useState(false);
-      const weatherCounty = useMemo(() => {
-        // 優先用 Day 1 第 1 站(實際目的地);沒有再退回 origin(通常是住家)
-        const addr = trip.days?.[0]?.locations?.[0]?.address || trip.origin?.address || '';
-        return parseCountyFromAddress(addr);
-      }, [trip.days, trip.origin?.address]);
       return (
         <div className="bg-white rounded-xl border border-slate-200 mb-3">
           <button
@@ -2936,9 +2818,6 @@ ${HTML_END}`;
                 {trip.startDate || '未指定日期'} · {trip.departureTime || '09:00'} 出發
                 {trip.notes ? ' · 有備註' : ''}
               </span>
-              {trip.startDate && weatherCounty && (
-                <WeatherChip county={weatherCounty} dateStr={trip.startDate} compact />
-              )}
             </span>
             <span className="text-slate-400">{expanded ? '▲' : '▼'}</span>
           </button>

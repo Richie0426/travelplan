@@ -278,9 +278,6 @@ window.firebaseConfig = {
 // (與 firebaseConfig.appId 不同,這是業務邏輯用的)
 window.appId = "travel-plan-personal";
 
-// (Phase 7 用)中央氣象署 API Key,可現在留空,之後申請後填入
-// 申請網址:https://opendata.cwa.gov.tw
-window.cwaApiKey = "";
 ```
 
 - 把上面 6 個欄位的值替換成步驟 0.4 複製到的內容。
@@ -300,7 +297,6 @@ window.firebaseConfig = {
   appId: "YOUR_APP_ID"
 };
 window.appId = "travel-plan-personal";
-window.cwaApiKey = "";
 ```
 
 ### 4. 加入 .gitignore（push 到 GitHub 前必做）

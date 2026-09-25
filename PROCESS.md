@@ -620,7 +620,12 @@ window.appId = "travel-plan-personal";
 - 黃提示：太早到（預估 < 預約 - 30 分鐘）
 - 行程中（Mobile View）即時警示
 
-### 7.4 天氣預報（Dashboard）
+### ~~7.4 天氣預報（Dashboard）~~ ❌ 已於 2026-09-25 移除
+
+> 實作過但整塊拿掉了。理由見 `CLAUDE.md` 的天氣預報段：出發前本來就會自己查，
+> 而金鑰必須送到瀏覽器，等於長期公開一把憑證換一個沒人用的功能。
+> 以下保留原始規劃內容作為歷史紀錄。
+
 - 註冊中央氣象署開放資料平台：https://opendata.cwa.gov.tw
 - 取得免費 API Key，加到 `config.js`：`window.cwaApiKey`
 - API 呼叫：一週天氣預報 `F-C0032-001` 或鄉鎮天氣預報 `F-D0047-091`

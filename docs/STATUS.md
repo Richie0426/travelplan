@@ -15,7 +15,7 @@
 | Phase 4 手機旅程模式 | ✅ 完成 | PlannerMobileView、下一站卡、沿途推薦、快速編輯 |
 | Phase 5 多人同步 | ✅ 完成 | shared_trips 同步、Viewer 完整、GPS 上傳、多人位置、家人名單管理 |
 | Phase 6 PWA | ⚠️ 程式碼完成，部署後驗證 | manifest、SW、預下載、安裝/更新提示 |
-| Phase 7 加分功能 | ✅ 完成 | 行程複製、PDF 匯出、CWA 天氣、（預約警示與相簿在 3B/3C） |
+| Phase 7 加分功能 | ✅ 完成 | 行程複製、PDF 匯出、（預約警示與相簿在 3B/3C）<br>~~CWA 天氣~~ 已於 2026-09-25 移除 |
 | **Phase 8 部署** | ⏳ **下一步** | 見 `docs/deployment.md` |
 
 ---
@@ -89,7 +89,6 @@
 ### Phase 7 — 加分功能
 - 📋 行程複製：清掉狀態/抵達/費用/揭曉，標題加「(複製)」
 - 📄 PDF 匯出：開新分頁列印版 → window.print() → 儲存為 PDF（中文系統字型完美）
-- ☀️ CWA 天氣預報：F-C0032-001（36 小時）、自動從地址解析縣市、Dashboard + Editor 顯示
 - ✅ 預約遲到/太早警示（Phase 3B 已做）
 - ✅ 共享相簿引導（Phase 3C 已做）
 
@@ -114,7 +113,6 @@
 |---|---|---|
 | GPS 抵達自動判定未做 | 中 | 規格說「距下一站 < 500m 持續 30 秒自動標 visited」，目前只能手動「✅ 我到了」。Phase 5 沒做（怕 GPS 在路上不穩誤判）。要做的話可加 throttle 後在 PlannerMobileView 加 useEffect 監聽自己上傳的位置 |
 | 新家人 join 不會自動加入現有 trip 的 activeMembers | 低 | 若 `trip.activeMembers` 是明確陣列（不是 null/undefined），新加入的家人不會自動入隊。規劃者要在 Editor「本次參與家人」勾選。可在 `handleFamilySetupComplete` 順手加進去 |
-| F-C0032-001 只有 36 小時資料 | 低 | 想要真 7 天預報要換 `F-D0047-091`（鄉鎮天氣），地址要能解析到鄉鎮層級（更細的 regex） |
 | PWA 圖示是 SVG 不是 PNG | 低 | SVG 在某些舊裝置可能不認，正式上線可用 [favicon.io](https://favicon.io) 產 PNG 取代 |
 | Service Worker 版本 hard-coded | 低 | 每次重大更新要手動改 `VERSION = '1.0.x'`，可考慮自動產生（如 commit hash） |
 | OSM tile 限流 | 低 | 大量預下載偶爾 429。modal 已說明，重試即可 |
@@ -124,12 +122,15 @@
 ## 📐 重要技術決策（避免新對話重新討論）
 
 1. **PDF 用 window.print() 而非 jsPDF**：免外部套件、中文系統字型完美、所見即所得
-2. **CWA 天氣端點選 F-C0032-001**：縣市層級夠用、36 小時夠決策、parse address 簡單
+2. ~~**CWA 天氣端點選 F-C0032-001**~~：功能已於 2026-09-25 整塊移除（見 CLAUDE.md）
 3. **shared_trips 寫入時機**：每次 `updateTrip` 後自動同步 + 初次載入 Editor/MobileView 也同步一次
 4. **GPS 上傳限流**：100m + 30s/120s 規則，平衡省電與即時
 5. **祕密景點過濾**：在規劃者側（`buildSharedTripSnapshot`）就過濾掉真名/地址，viewer 端拿到的本就是 alias
 6. **Live Server 注入問題**：source 不要寫完整 `</body>` 字面（包括註解），改用拼接 `'<' + '/body>'`
-7. **config.js 公開無妨**：Firebase / CWA 兩個 key 都是 Web 公開設計，安全靠 Rules
+7. **config.js 公開無妨**：Firebase key 是 Web 公開設計，安全靠 Rules。
+   ⚠️ 原本這條把 CWA key 一起算進來是**錯的**——CWA key 是憑證不是識別碼，
+   與 CLAUDE.md 的金鑰分級表（標為 🟠 建議不要）互相矛盾。
+   2026-09-25 移除天氣功能後此爭議消失。
 
 ---
 
@@ -140,7 +141,7 @@
 ├── CLAUDE.md             # 專案規格（單一事實來源）
 ├── PROCESS.md            # 開發流程（按 Phase 列驗收）
 ├── index.html            # 主應用（單檔架構，~5700 行）
-├── config.js             # Firebase + CWA 金鑰（已 commit）
+├── config.js             # Firebase 設定（已 commit，公開無妨）
 ├── manifest.json         # PWA manifest
 ├── service-worker.js     # PWA SW
 ├── icon-192.svg          # PWA 圖示

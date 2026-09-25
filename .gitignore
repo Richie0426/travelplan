@@ -112,3 +112,34 @@ firestore-debug.log
 # config.js — 預設「不」忽略(見檔案頂部說明)
 # 若您要採用策略 B(不 commit 金鑰),取消下方註解:
 # config.js
+
+
+# ===================================================================
+# === 機敏資訊(絕對不可進 Git)===
+# 本 repo 是「公開」的(GitHub Pages 免費方案需要 public repo),
+# 任何進入 Git 的東西都等同對全世界公開,而且刪檔也清不掉歷史紀錄。
+# 以下規則保護真正的密鑰(LINE Token、Google OAuth、服務帳號金鑰等)。
+# ===================================================================
+
+# 本機機敏筆記(所有 *.local.md 一律排除)
+*.local.md
+SECRETS.local.md
+
+# LINE BOT / Google Apps Script 相關程式與金鑰
+prog/
+gas/
+*.gs.local
+line-*.local.*
+
+# Google 服務帳號金鑰(Firestore REST / Drive API 會用到)
+service-account*.json
+*-serviceaccount.json
+*credentials*.json
+!config.example.js
+
+# 通用金鑰檔
+.env
+.env.*
+*.pem
+*.key
+secrets/

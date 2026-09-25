@@ -10,7 +10,7 @@
 開始之前，確認以下檔案都在專案根目錄：
 
 - [x] `index.html`（主應用）
-- [x] `config.js`（**含您的 Firebase 與 CWA 金鑰**）
+- [x] `config.js`（**含您的 Firebase 設定**）
 - [x] `manifest.json`
 - [x] `service-worker.js`
 - [x] `icon-192.svg` / `icon-512.svg`
@@ -24,7 +24,6 @@
 
 ```javascript
 window.firebaseConfig = { apiKey: "AIza...", ... };
-window.cwaApiKey = "CWA-XXXX-...";
 ```
 
 **這兩個 key 都是「Web 公開金鑰」設計上就會被瀏覽器看到**：
@@ -32,7 +31,6 @@ window.cwaApiKey = "CWA-XXXX-...";
 | Key | 為何公開無妨 |
 |---|---|
 | `firebaseConfig.apiKey` | Firebase Web SDK 設計如此，安全靠 Firestore Rules 保證 |
-| `cwaApiKey` | 中央氣象署免費 key 本來就只用於請求簽署，無付費風險 |
 
 所以這個 `config.js` 直接 commit 進 repo 沒問題。專案的 `.gitignore` 預設不忽略它。
 
@@ -220,7 +218,8 @@ A：可以。Settings → Pages → **Custom domain** 填您的網域，DNS 加�
 A：不用。家人的稱呼存在他們手機的 localStorage 跟 Firestore 的 `known_family`，不會因為您重新部署而消失。
 
 ### Q：CWA API key 被人拿走怎麼辦？
-A：中央氣象署 key 沒有額度上限的計費風險，被偷用也不會收您錢。如果想換，到 [opendata.cwa.gov.tw](https://opendata.cwa.gov.tw) → 我的金鑰 → 重新產生，改 config.js push 即可。
+A：**本專案已於 2026-09-25 移除天氣功能**，`config.js` 不再有 CWA 金鑰，此問題不再適用。
+（舊金鑰曾進過公開 repo，已在 CWA 後台作廢。）
 
 ### Q：Firebase key 真的不用擔心？
 A：對。Firebase Web SDK 設計上就會把 key 露出在瀏覽器，安全靠 Firestore Rules（已部署：「使用者私有空間只有 owner 能讀寫」「shared 空間需要已登入」）。除非您 Rules 設錯讓任意人能寫您的資料庫，否則 key 公開無妨。
