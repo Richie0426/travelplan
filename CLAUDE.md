@@ -1080,5 +1080,51 @@ git check-ignore -v SECRETS.local.md
 
 ---
 
-**最後更新**：2026-09-20  
+## 17. 變更紀錄
+
+### 2026-09-25 — 移除 CWA 天氣預報功能 ❌
+
+**做了什麼**
+
+| 檔案 | 變更 |
+|------|------|
+| `index.html` | −121 行：`TW_COUNTY_REGEX`／`parseCountyFromAddress`／`wxEmoji`／`_cwaCache`／`fetchCwaWeather`／`WeatherChip`，以及行程卡片與 `TripSettingsPanel` 兩處使用點 |
+| `config.js` | 移除 `window.cwaApiKey` |
+| 文件 | `CLAUDE.md` §11／`PROCESS.md` §7.4／`docs/STATUS.md`／`docs/deployment.md`／`docs/firebase-setup.md`／`docs/user-guide.md` §12.5 同步更新 |
+
+commit `efc7ffb`，已 push 並確認 GitHub Pages 線上版生效。
+
+**為什麼移除**
+
+1. **實際價值低**：出發前本來就會自己查天氣，沒有人靠規劃書看天氣。
+2. **無法隱藏金鑰**：本專案是純前端 PWA，天氣 API 由瀏覽器直接呼叫，
+   金鑰**必然**出現在使用者端。就算不 commit 進 repo，打開 DevTools 也看得到。
+   等於長期公開一把憑證，換一個沒人用的功能。
+
+**順帶修正的文件矛盾**
+
+`docs/STATUS.md` 原本的決策記著「config.js 公開無妨：Firebase / CWA 兩個 key
+都是 Web 公開設計」，這與 §16.2 金鑰分級表把 CWA key 標為 🟠「建議不要」互相衝突，
+而且前者是錯的：
+
+- **Firebase Web API Key = 識別碼**，設計上就公開，安全靠 Firestore Rules
+- **CWA API Key = 憑證**，拿到就能以你的身分呼叫，沒有第二道防線
+
+當初就是依據錯的那條結論才把 CWA key commit 進公開 repo。功能移除後爭議消失，
+但這個教訓要留著：**判斷一把金鑰能不能公開，看的是「它是識別碼還是憑證」，
+不是「它是不是前端用的」。**
+
+**待辦**
+
+- [ ] 到 opendata.cwa.gov.tw 作廢舊金鑰 `CWA-1918544C-…`
+      （金鑰仍留在 git 歷史中，無法清除；依 §16.6，**作廢才是真正的解法**）
+
+**若日後想做回天氣功能**
+
+不要再放前端。家庭 LINE BOT（`D:/vscode/linebot-gas/`）是現成的後端，
+可由 GAS 用 Script Properties 保管金鑰、代為呼叫 CWA 並快取，前端只打 GAS。
+
+---
+
+**最後更新**：2026-09-25  
 **規格決策來源**：與 Richie 在 Cowork mode 的需求討論
